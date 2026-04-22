@@ -1,6 +1,6 @@
-DROP DATABASE IF EXISTS hostel_management;
-CREATE DATABASE hostel_management;
-USE hostel_management;
+-- DROP DATABASE IF EXISTS hostel_management;
+-- CREATE DATABASE hostel_management;
+-- USE hostel_management;
 
 CREATE TABLE Phone (
     ID INT PRIMARY KEY AUTO_INCREMENT,
