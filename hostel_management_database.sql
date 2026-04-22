@@ -23,7 +23,7 @@ CREATE TABLE User (
     
     FOREIGN KEY (Phone_ID) REFERENCES Phone(ID) ON DELETE SET NULL,
     INDEX idx_email (Email),
-    INDEX idx_phone (Phone_ID)
+    INDEX idx_phone_id (Phone_ID)
 );
 
 CREATE TABLE Client (
@@ -41,21 +41,8 @@ CREATE TABLE Manager (
     ID INT PRIMARY KEY AUTO_INCREMENT,
     Salary DECIMAL(10, 2),
     Hire_date DATE NOT NULL,
-    INDEX idx_hire_date (Hire_date)
-);
-
-CREATE TABLE Notice_board (
-    Notice_ID INT PRIMARY KEY AUTO_INCREMENT,
-    Description TEXT,
-    Title VARCHAR(200) NOT NULL,
-    Date DATE NOT NULL,
-    Expiry_date DATE,
-    Manager_ID INT NOT NULL,
     
-    FOREIGN KEY (Manager_ID) REFERENCES Manager(ID) ON DELETE RESTRICT,
-    INDEX idx_manager (Manager_ID),
-    INDEX idx_date (Date),
-    INDEX idx_expiry (Expiry_date)
+    INDEX idx_hire_date (Hire_date)
 );
 
 CREATE TABLE Visitors_log (
@@ -68,6 +55,30 @@ CREATE TABLE Visitors_log (
     
     FOREIGN KEY (Client_id) REFERENCES Client(ID) ON DELETE CASCADE,
     INDEX idx_client (Client_id)
+);
+
+CREATE TABLE Room (
+    Floor_num INT NOT NULL,
+    Room_num INT NOT NULL,
+    Status VARCHAR(50),
+    Capacity INT,
+    Room_type VARCHAR(50),
+    
+    PRIMARY KEY (Floor_num, Room_num),
+    INDEX idx_status (Status),
+    INDEX idx_room_type (Room_type)
+);
+
+CREATE TABLE Meal_Booking (
+    Meal_Booking_ID INT PRIMARY KEY AUTO_INCREMENT,
+    Type VARCHAR(50),
+    Date DATE NOT NULL,
+    Total_cost DECIMAL(10, 2),
+    Client_ID INT NOT NULL,
+    
+    FOREIGN KEY (Client_ID) REFERENCES Client(ID) ON DELETE CASCADE,
+    INDEX idx_client (Client_ID),
+    INDEX idx_date (Date)
 );
 
 CREATE TABLE Room_Swap_Req (
@@ -83,80 +94,12 @@ CREATE TABLE Room_Swap_Req (
     INDEX idx_request_date (Request_Date)
 );
 
-CREATE TABLE Payment_Record (
-    TX_ID INT PRIMARY KEY AUTO_INCREMENT,
-    Payment_Amount DECIMAL(10, 2) NOT NULL,
-    Payment_Method VARCHAR(50),
-    Payment_Date DATE NOT NULL,
-    Student_ID INT NOT NULL,
-    Client_ID INT,
-    
-    FOREIGN KEY (Student_ID) REFERENCES User(ID) ON DELETE CASCADE,
-    FOREIGN KEY (Client_ID) REFERENCES Client(ID) ON DELETE SET NULL,
-    INDEX idx_student (Student_ID),
-    INDEX idx_client (Client_ID),
-    INDEX idx_payment_date (Payment_Date)
-);
-
-CREATE TABLE Meal_Booking (
-    Meal_Booking_ID INT PRIMARY KEY AUTO_INCREMENT,
-    Type VARCHAR(50),
-    Date DATE NOT NULL,
-    Total_cost DECIMAL(10, 2),
-    Client_ID INT NOT NULL,
-    
-    FOREIGN KEY (Client_ID) REFERENCES Client(ID) ON DELETE CASCADE,
-    INDEX idx_client (Client_ID),
-    INDEX idx_date (Date)
-);
-
-CREATE TABLE Complaints (
-    Complaint_ID INT PRIMARY KEY AUTO_INCREMENT,
-    Complaint_Date DATE NOT NULL,
-    Complaint_Text TEXT NOT NULL,
-    Status VARCHAR(50),
-    Manager_ID INT NOT NULL,
-    Client_ID INT NOT NULL,
-    
-    FOREIGN KEY (Manager_ID) REFERENCES Manager(ID) ON DELETE RESTRICT,
-    FOREIGN KEY (Client_ID) REFERENCES Client(ID) ON DELETE CASCADE,
-    INDEX idx_manager (Manager_ID),
-    INDEX idx_client (Client_ID),
-    INDEX idx_status (Status),
-    INDEX idx_complaint_date (Complaint_Date)
-);
-
-CREATE TABLE Accountings (
-    Package_ID INT PRIMARY KEY AUTO_INCREMENT,
-    Package_Name VARCHAR(100) NOT NULL,
-    Room_Type VARCHAR(50),
-    Duration INT,
-    Price DECIMAL(10, 2),
-    Manager_ID INT NOT NULL,
-    
-    FOREIGN KEY (Manager_ID) REFERENCES Manager(ID) ON DELETE RESTRICT,
-    INDEX idx_manager (Manager_ID),
-    INDEX idx_room_type (Room_Type)
-);
-
-CREATE TABLE Room (
-    Floor_num INT NOT NULL,
-    Room_num INT NOT NULL,
-    Status VARCHAR(50),
-    Capacity INT,
-    Room_type VARCHAR(50),
-    
-    PRIMARY KEY (Floor_num, Room_num),
-    INDEX idx_status (Status),
-    INDEX idx_room_type (Room_type)
-);
-
 CREATE TABLE Stays_IN (
     client_id INT,
-    Room_Num INT,
     Floor_NUM INT,
+    Room_Num INT,
     
-    PRIMARY KEY (client_id, Room_Num, Floor_NUM),
+    PRIMARY KEY (client_id, Floor_NUM, Room_Num),
     FOREIGN KEY (client_id) REFERENCES Client(ID) ON DELETE CASCADE,
     FOREIGN KEY (Floor_NUM, Room_Num) REFERENCES Room(Floor_num, Room_num) ON DELETE CASCADE,
     INDEX idx_client (client_id)
@@ -175,4 +118,48 @@ CREATE TABLE Booking_Allocation (
     INDEX idx_client (client_id),
     INDEX idx_status (Booking_status),
     INDEX idx_booking_date (Booking_date)
+);
+
+CREATE TABLE Accountings (
+    Package_ID INT PRIMARY KEY AUTO_INCREMENT,
+    Package_Name VARCHAR(100) NOT NULL,
+    Room_Type VARCHAR(50),
+    Duration INT,
+    Price DECIMAL(10, 2),
+    Manager_ID INT NOT NULL,
+    
+    FOREIGN KEY (Manager_ID) REFERENCES Manager(ID) ON DELETE RESTRICT,
+    INDEX idx_manager (Manager_ID),
+    INDEX idx_room_type (Room_Type)
+);
+
+CREATE TABLE Payment_Record (
+    TX_ID INT PRIMARY KEY AUTO_INCREMENT,
+    Payment_Amount DECIMAL(10, 2) NOT NULL,
+    Payment_Method VARCHAR(50),
+    Payment_Date DATE NOT NULL,
+    Student_ID INT NOT NULL,
+    Client_ID INT,
+    
+    FOREIGN KEY (Student_ID) REFERENCES User(ID) ON DELETE CASCADE,
+    FOREIGN KEY (Client_ID) REFERENCES Client(ID) ON DELETE SET NULL,
+    INDEX idx_student (Student_ID),
+    INDEX idx_client (Client_ID),
+    INDEX idx_payment_date (Payment_Date)
+);
+
+CREATE TABLE Complaints (
+    Complaint_ID INT PRIMARY KEY AUTO_INCREMENT,
+    Complaint_Date DATE NOT NULL,
+    Complaint_Text TEXT NOT NULL,
+    Status VARCHAR(50),
+    Manager_ID INT NOT NULL,
+    Client_ID INT NOT NULL,
+    
+    FOREIGN KEY (Manager_ID) REFERENCES Manager(ID) ON DELETE RESTRICT,
+    FOREIGN KEY (Client_ID) REFERENCES Client(ID) ON DELETE CASCADE,
+    INDEX idx_manager (Manager_ID),
+    INDEX idx_client (Client_ID),
+    INDEX idx_status (Status),
+    INDEX idx_complaint_date (Complaint_Date)
 );
