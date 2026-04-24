@@ -32,10 +32,16 @@ CREATE TABLE Client (
     Student_ID INT NOT NULL,
     Guardian_name VARCHAR(100) NOT NULL,
     Guardian_Phone VARCHAR(15),
+    Status VARCHAR(50) DEFAULT 'Pending',      
+    Approved_by INT,                           
+    Approval_Date DATE,                        
     
     FOREIGN KEY (Student_ID) REFERENCES User(ID) ON DELETE CASCADE,
+    FOREIGN KEY (Approved_by) REFERENCES Manager(ID) ON DELETE SET NULL,
     UNIQUE KEY unique_student_client (Student_ID),
-    INDEX idx_student (Student_ID)
+    INDEX idx_status (Status),
+    INDEX idx_approved_by (Approved_by),
+    INDEX idx_approval_date (Approval_Date)
 );
 
 CREATE TABLE Manager (
