@@ -32,7 +32,7 @@ CREATE TABLE Client (
     Student_ID INT NOT NULL,
     Guardian_name VARCHAR(100) NOT NULL,
     Guardian_Phone VARCHAR(15),
-    -- Status VARCHAR(50) DEFAULT 'Pending',      
+    Status VARCHAR(50) DEFAULT 'Pending',      
     Approved_by INT,                           
     Approval_Date DATE,                        
     
@@ -46,7 +46,7 @@ CREATE TABLE Client (
 
 CREATE TABLE Manager (
     ID INT PRIMARY KEY AUTO_INCREMENT,
-    Salary DECIMAL(10, 2),
+    Salary DECIMAL(10, 2), 
     Hire_date DATE NOT NULL,
     
     INDEX idx_hire_date (Hire_date)
