@@ -1,6 +1,6 @@
 <?php
 session_start();
-require_once('DBconnect.php');
+require_once('config/db_connection.php');
 
 if (isset($_POST['role']) && isset($_POST['userid']) && isset($_POST['password'])) {
 
@@ -39,7 +39,7 @@ if (isset($_POST['role']) && isset($_POST['userid']) && isset($_POST['password']
                     u.L_name,
                     u.Password,
                     c.ID AS Client_ID,
-                    c.Approval_Status
+                    c.Status
                 FROM `User` u
                 INNER JOIN Client c ON c.Student_ID = u.ID
                 WHERE u.ID = ?
@@ -54,7 +54,8 @@ if (isset($_POST['role']) && isset($_POST['userid']) && isset($_POST['password']
 
             $row = mysqli_fetch_assoc($result);
 
-            if ($password != $row['Password']) {
+            // if ($password != $row['Password'])
+            if (!password_verify($password, $row['Password'])) {
                 echo "Wrong client ID or password.";
                 exit();
             }
@@ -93,7 +94,8 @@ if (isset($_POST['role']) && isset($_POST['userid']) && isset($_POST['password']
 
             $row = mysqli_fetch_assoc($result);
 
-            if ($password != $row['Password']) {
+            // if ($password != $row['Password'])
+            if (!password_verify($password, $row['Password'])) {
                 echo "Wrong manager ID or password.";
                 exit();
             }
