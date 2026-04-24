@@ -80,10 +80,15 @@ if (isset($_POST['role']) && isset($_POST['userid']) && isset($_POST['password']
 
     } elseif ($role == "manager") {
 
-        $sql = "SELECT ID, Password
-                FROM Manager
-                WHERE ID = ?
-                LIMIT 1";
+        $sql = "SELECT
+                m.ID AS Manager_ID,
+                u.Password,
+                u.F_name,
+                u.L_name
+            FROM Manager m
+            INNER JOIN User u ON u.ID = m.User_ID
+            WHERE u.ID = ?
+            LIMIT 1";
 
         $stmt = mysqli_prepare($conn, $sql);
         mysqli_stmt_bind_param($stmt, "i", $real_id);
@@ -101,8 +106,9 @@ if (isset($_POST['role']) && isset($_POST['userid']) && isset($_POST['password']
             }
 
             $_SESSION['role'] = "manager";
-            $_SESSION['manager_id'] = $row['ID'];
-            $_SESSION['name'] = "Manager " . $login_id;
+            $_SESSION['manager_id'] = $row['Manager_ID'];
+            $_SESSION['user_id'] = $row['User_ID'];
+            $_SESSION['name'] = $row['F_name'] . " " . $row['L_name'];
 
             header("Location: manager_dashboard.php");
             exit();
