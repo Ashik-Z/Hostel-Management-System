@@ -32,7 +32,7 @@ CREATE TABLE Client (
     Student_ID INT NOT NULL,
     Guardian_name VARCHAR(100) NOT NULL,
     Guardian_Phone VARCHAR(15),
-    -- Status VARCHAR(50) DEFAULT 'Pending',      
+    Status VARCHAR(50) DEFAULT 'Pending',      
     Approved_by INT,                           
     Approval_Date DATE,                        
     
