@@ -1,6 +1,6 @@
 <?php
 session_start();
-require_once('DBconnect.php');
+require_once('db_connection.php');
 
 if (isset($_POST['role']) && isset($_POST['userid']) && isset($_POST['password'])) {
 
