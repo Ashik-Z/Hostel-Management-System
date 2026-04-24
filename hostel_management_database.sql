@@ -27,6 +27,17 @@ CREATE TABLE User (
     INDEX idx_phone_id (Phone_ID)
 );
 
+CREATE TABLE Manager (
+    ID INT PRIMARY KEY AUTO_INCREMENT,
+    User_ID INT NOT NULL,
+    Salary DECIMAL(10, 2), 
+    Hire_date DATE NOT NULL,
+
+    FOREIGN KEY (User_ID) REFERENCES `User`(ID) ON DELETE CASCADE,
+    INDEX idx_hire_date (Hire_date)
+    
+);
+
 CREATE TABLE Client (
     ID INT PRIMARY KEY AUTO_INCREMENT,
     Student_ID INT NOT NULL,
@@ -44,17 +55,6 @@ CREATE TABLE Client (
     INDEX idx_approval_date (Approval_Date)
 );
 
-CREATE TABLE Manager (
-    ID INT PRIMARY KEY AUTO_INCREMENT,
-    User_ID INT NOT NULL UNIQUE,
-    Salary DECIMAL(10, 2), 
-    Hire_date DATE NOT NULL,
-    
-    -- INDEX idx_hire_date (Hire_date)
-    FOREIGN KEY (User_ID) REFERENCES User(ID) ON DELETE CASCADE,
-    INDEX idx_hire_date (Hire_date),
-    INDEX idx_user_id (User_ID)
-);
 
 CREATE TABLE Visitors_log (
     Visitor_ID INT PRIMARY KEY AUTO_INCREMENT,
