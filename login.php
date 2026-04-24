@@ -86,7 +86,7 @@ if (isset($_POST['role']) && isset($_POST['userid']) && isset($_POST['password']
                 u.F_name,
                 u.L_name
             FROM Manager m
-            INNER JOIN User u ON u.ID = m.User_ID
+            -- INNER JOIN User u ON u.ID = m.User_ID
             WHERE u.ID = ?
             LIMIT 1";
 
