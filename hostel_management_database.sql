@@ -46,10 +46,14 @@ CREATE TABLE Client (
 
 CREATE TABLE Manager (
     ID INT PRIMARY KEY AUTO_INCREMENT,
+    User_ID INT NOT NULL UNIQUE,
     Salary DECIMAL(10, 2), 
     Hire_date DATE NOT NULL,
     
-    INDEX idx_hire_date (Hire_date)
+    -- INDEX idx_hire_date (Hire_date)
+    FOREIGN KEY (User_ID) REFERENCES User(ID) ON DELETE CASCADE,
+    INDEX idx_hire_date (Hire_date),
+    INDEX idx_user_id (User_ID)
 );
 
 CREATE TABLE Visitors_log (
