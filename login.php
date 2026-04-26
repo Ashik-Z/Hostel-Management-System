@@ -10,7 +10,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $email    = trim($_POST['email'] ?? "");
     $password = trim($_POST['password'] ?? "");
 
-    // ── Validation ──────────────────────────────────────────────
     if ($role === "" || $email === "" || $password === "") {
         $message = "All fields are required.";
     } elseif (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
@@ -19,7 +18,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $message = "Password must be between 4 and 255 characters.";
     } elseif ($role === "client") {
 
-        // ── Client login ─────────────────────────────────────────
         $sql = "SELECT
                     u.ID       AS User_ID,
                     u.F_name,
@@ -59,7 +57,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     } elseif ($role === "manager") {
 
-        // ── Manager login ────────────────────────────────────────
         $sql = "SELECT
                     m.ID       AS Manager_ID,
                     m.User_ID,
@@ -240,7 +237,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 </div>
 
 <script>
-  // Restore role toggle if form was resubmitted with errors
   const postedRole = "<?= htmlspecialchars($_POST['role'] ?? 'client') ?>";
   if (postedRole === 'manager') {
     document.querySelectorAll('.role-btn').forEach((b, i) => {
