@@ -3,9 +3,8 @@ include 'config/db_connection.php';
 
 echo "<h1>Create Test Users</h1>";
 
-// ─── Test Client User ───────────────────────────────────────────
 $user_id = 1234567890;
-$email = 'testclient@example.com'; // ✅ FIXED: must be assigned BEFORE bind_param
+$email = 'testclient@example.com'; 
 $password = password_hash('password123', PASSWORD_BCRYPT);
 $f_name = 'Test';
 $l_name = 'Client';
@@ -34,13 +33,11 @@ if ($stmt->execute()) {
     echo "❌ Error creating test user: " . $conn->error . "<br>";
 }
 
-// ─── Test Manager User ──────────────────────────────────────────
 $manager_user_id = 1000000001;
-$manager_email = 'testmanager@example.com'; // ✅ FIXED: managers need a User record too
+$manager_email = 'testmanager@example.com'; 
 $manager_password = password_hash('manager123', PASSWORD_BCRYPT);
 $manager_reg_date = date('Y-m-d');
 
-// ✅ FIXED: Create User record first, then Manager record linked via User_ID
 $sql3 = "INSERT IGNORE INTO User (ID, Email, Password, F_name, L_name, Reg_Date)
          VALUES (?, ?, ?, 'Test', 'Manager', ?)";
 $stmt3 = $conn->prepare($sql3);
@@ -48,8 +45,7 @@ $stmt3->bind_param("isss", $manager_user_id, $manager_email, $manager_password, 
 
 if ($stmt3->execute()) {
     echo "✅ Manager user account created<br>";
-
-    // ✅ FIXED: Insert into Manager using User_ID, not a separate ID + Password
+    
     $sql4 = "INSERT IGNORE INTO Manager (User_ID, Salary, Hire_date)
              VALUES (?, 50000, '2026-01-01')";
     $stmt4 = $conn->prepare($sql4);
