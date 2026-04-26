@@ -13,7 +13,6 @@ $client_name = $_SESSION['name'];
 $message     = "";
 $msg_type    = "";
 
-// ── Handle visitor request submission ───────────────────────────
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'request_visitor') {
     $visitor_name  = trim($_POST['visitor_name'] ?? "");
     $visitor_phone = trim($_POST['visitor_phone'] ?? "");
@@ -38,7 +37,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     }
 }
 
-// ── Fetch client details ─────────────────────────────────────────
 $sql  = "SELECT u.F_name, u.L_name, u.Email, u.Gender, u.D_birth,
                 u.Street, u.Area, u.Zip_code, p.Phone,
                 c.Status AS Account_Status, c.Guardian_name,
@@ -52,7 +50,6 @@ mysqli_stmt_bind_param($stmt, "i", $user_id);
 mysqli_stmt_execute($stmt);
 $client = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
 
-// ── Fetch visitor log ────────────────────────────────────────────
 $vsql  = "SELECT Visitor_ID, Visitor_Name, Visitor_Phone,
                  Status, Requested_time, Entry_time, Exit_time
           FROM Visitors_log WHERE Client_id = ? ORDER BY Visitor_ID DESC";
@@ -89,7 +86,6 @@ $active_tab = $_GET['tab'] ?? 'overview';
   }
   body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; display: flex; }
 
-  /* ── Sidebar ── */
   .sidebar { width: var(--sidebar); min-height: 100vh; background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; position: fixed; top: 0; left: 0; z-index: 100; }
   .sidebar-logo { padding: 1.5rem; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; }
   .logo-icon { width: 32px; height: 32px; background: var(--accent); border-radius: 7px; display: flex; align-items: center; justify-content: center; }
@@ -112,7 +108,6 @@ $active_tab = $_GET['tab'] ?? 'overview';
   .logout-btn { font-size: 11px; color: var(--muted); text-decoration: none; display: block; text-align: center; margin-top: .75rem; transition: color .15s; }
   .logout-btn:hover { color: var(--rejected); }
 
-  /* ── Main ── */
   .main { margin-left: var(--sidebar); flex: 1; padding: 2rem; }
   .page-title { font-family: 'DM Serif Display', serif; font-size: 24px; font-weight: 400; }
   .page-sub   { font-size: 13px; color: var(--muted); margin-top: 2px; margin-bottom: 1.75rem; }
@@ -139,7 +134,6 @@ $active_tab = $_GET['tab'] ?? 'overview';
   .info-label { color: var(--muted); flex-shrink: 0; }
   .info-value { font-weight: 500; text-align: right; }
 
-  /* ── Visitors tab ── */
   .vstats { display: flex; gap: .75rem; margin-bottom: 1.5rem; }
   .vstat  { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: .75rem 1.25rem; flex: 1; }
   .vstat-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 4px; }
