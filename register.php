@@ -20,7 +20,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $area           = trim($_POST['area'] ?? "");
     $zip            = trim($_POST['zip'] ?? "");
 
-    // ── Validation ──────────────────────────────────────────────
     if ($role === "" || $email === "" || $password === "" || $fname === "") {
         $message = "Role, email, password, and first name are required.";
     } elseif (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
@@ -33,11 +32,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         $dob     = $dob === "" ? null : $dob;
         $hashed  = password_hash($password, PASSWORD_BCRYPT);
-
         mysqli_begin_transaction($conn);
 
         try {
-            // ── Check email uniqueness ───────────────────────────
             $chk = mysqli_prepare($conn, "SELECT ID FROM `User` WHERE Email = ? LIMIT 1");
             mysqli_stmt_bind_param($chk, "s", $email);
             mysqli_stmt_execute($chk);
@@ -45,7 +42,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 throw new Exception("An account with this email already exists.");
             }
 
-            // ── Handle phone ─────────────────────────────────────
             $phone_id = null;
             if ($phone !== "") {
                 $pchk = mysqli_prepare($conn, "SELECT ID FROM Phone WHERE Phone = ? LIMIT 1");
@@ -62,7 +58,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
             }
 
-            // ── Insert User ──────────────────────────────────────
             $usql = "INSERT INTO `User`
                         (Email, Password, Reg_Date, Gender, D_birth, Phone_ID,
                          F_name, M_name, L_name, Street, Area, Zip_code)
@@ -75,7 +70,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if (!mysqli_stmt_execute($ustmt)) throw new Exception(mysqli_error($conn));
             $new_user_id = mysqli_insert_id($conn);
 
-            // ── Role-specific insert ─────────────────────────────
             if ($role === "manager") {
 
                 $salary    = floatval($_POST['salary'] ?? 0);
@@ -88,8 +82,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                 $manager_id = mysqli_insert_id($conn);
                 mysqli_commit($conn);
-
-                // Auto-login manager after registration
                 $_SESSION['role']       = "manager";
                 $_SESSION['user_id']    = $new_user_id;
                 $_SESSION['manager_id'] = $manager_id;
@@ -344,7 +336,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       </div>
     </div>
 
-    <!-- Client-only -->
     <div class="role-section visible" id="client-section">
       <div class="section-label">Guardian info</div>
       <div class="grid-2">
@@ -365,7 +356,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       </div>
     </div>
 
-    <!-- Manager-only -->
     <div class="role-section" id="manager-section">
       <div class="section-label">Employment info</div>
       <div class="grid-2">
@@ -390,7 +380,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 </div>
 
 <script>
-  // Restore role toggle if form was resubmitted with errors
   const postedRole = "<?= htmlspecialchars($_POST['role'] ?? 'client') ?>";
   if (postedRole === 'manager') {
     document.querySelectorAll('.role-btn').forEach((b, i) => {
@@ -421,7 +410,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
   }
 
-  // Set initial required state
   if (postedRole === 'client') {
     document.getElementById('guardian-name').setAttribute('required', '');
   }
