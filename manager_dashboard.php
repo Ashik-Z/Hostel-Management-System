@@ -13,11 +13,9 @@ $message      = "";
 $msg_type     = "";
 $active_tab   = $_GET['tab'] ?? 'registrations';
 
-// ── Handle actions ───────────────────────────────────────────────
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     $action = $_POST['action'];
 
-    // Client registration approve/reject
     if (in_array($action, ['approve_client', 'reject_client']) && isset($_POST['client_id'])) {
         $client_id  = intval($_POST['client_id']);
         $new_status = $action === 'approve_client' ? 'Approved' : 'Rejected';
@@ -34,7 +32,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         }
     }
 
-    // Visitor approve
     if ($action === 'approve_visitor' && isset($_POST['visitor_id'])) {
         $visitor_id = intval($_POST['visitor_id']);
         $entry_time = trim($_POST['entry_time'] ?? "") ?: null;
@@ -52,7 +49,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         }
     }
 
-    // Visitor reject
     if ($action === 'reject_visitor' && isset($_POST['visitor_id'])) {
         $visitor_id = intval($_POST['visitor_id']);
         $sql  = "UPDATE Visitors_log SET Status = 'Rejected'
@@ -69,7 +65,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     }
 }
 
-// ── Stats ────────────────────────────────────────────────────────
 $s = [];
 foreach (['Pending','Approved','Rejected'] as $st) {
     $r = mysqli_query($conn, "SELECT COUNT(*) AS c FROM Client WHERE Status = '$st'");
@@ -83,7 +78,6 @@ foreach (['Pending','Approved','Rejected'] as $st) {
     $s['visitor_' . strtolower($st)] = mysqli_fetch_assoc($r)['c'];
 }
 
-// ── Fetch clients ────────────────────────────────────────────────
 $cf = $_GET['filter'] ?? 'Pending';
 if (!in_array($cf, ['Pending','Approved','Rejected','All'])) $cf = 'Pending';
 
@@ -110,7 +104,6 @@ if ($cf === 'All') {
 $clients = [];
 while ($row = mysqli_fetch_assoc($cr)) $clients[] = $row;
 
-// ── Fetch visitors ───────────────────────────────────────────────
 $vf = $_GET['vfilter'] ?? 'Pending';
 if (!in_array($vf, ['Pending','Approved','Rejected','All'])) $vf = 'Pending';
 
@@ -160,7 +153,6 @@ while ($row = mysqli_fetch_assoc($vr)) $visitors[] = $row;
   }
   body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; display: flex; }
 
-  /* ── Sidebar ── */
   .sidebar { width: var(--sidebar); min-height: 100vh; background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; position: fixed; top: 0; left: 0; z-index: 100; }
   .sidebar-logo { padding: 1.5rem; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; }
   .logo-icon { width: 32px; height: 32px; background: var(--accent); border-radius: 7px; display: flex; align-items: center; justify-content: center; }
@@ -183,7 +175,6 @@ while ($row = mysqli_fetch_assoc($vr)) $visitors[] = $row;
   .logout-btn { font-size: 11px; color: var(--muted); text-decoration: none; display: block; text-align: center; margin-top: .75rem; transition: color .15s; }
   .logout-btn:hover { color: var(--rejected); }
 
-  /* ── Main ── */
   .main { margin-left: var(--sidebar); flex: 1; padding: 2rem; }
   .page-title { font-family: 'DM Serif Display', serif; font-size: 24px; font-weight: 400; }
   .page-sub   { font-size: 13px; color: var(--muted); margin-top: 2px; margin-bottom: 1.75rem; }
@@ -197,14 +188,12 @@ while ($row = mysqli_fetch_assoc($vr)) $visitors[] = $row;
   .toast.success { background: var(--approved-bg); border: 1px solid rgba(109,171,126,.3); color: var(--approved); }
   .toast.error   { background: var(--rejected-bg);  border: 1px solid rgba(212,101,90,.3);  color: var(--rejected); }
 
-  /* Stats */
   .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin-bottom: 2rem; }
   .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.25rem 1.5rem; }
   .stat-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .07em; margin-bottom: .5rem; }
   .stat-value { font-family: 'DM Serif Display', serif; font-size: 32px; line-height: 1; }
   .stat-value.p { color: var(--pending); } .stat-value.a { color: var(--approved); } .stat-value.r { color: var(--rejected); }
 
-  /* Filter tabs */
   .filter-bar { display: flex; gap: 6px; margin-bottom: 1.25rem; }
   .ftab { padding: 5px 14px; border-radius: 20px; font-size: 12px; font-weight: 500; text-decoration: none; color: var(--muted); border: 1px solid var(--border); transition: all .15s; }
   .ftab:hover { color: var(--text); }
@@ -213,7 +202,6 @@ while ($row = mysqli_fetch_assoc($vr)) $visitors[] = $row;
   .ftab.fr { background: var(--rejected-bg); border-color: var(--rejected); color: var(--rejected); }
   .ftab.fall { background: var(--surface2);  border-color: var(--border2);  color: var(--text);     }
 
-  /* Table */
   .table-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
   table { width: 100%; border-collapse: collapse; }
   thead th { padding: .7rem 1.25rem; text-align: left; font-size: 11px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); background: var(--surface2); border-bottom: 1px solid var(--border); }
@@ -237,7 +225,6 @@ while ($row = mysqli_fetch_assoc($vr)) $visitors[] = $row;
   .btn-reject:hover  { background: rgba(212,101,90,.2); }
   .btn-disabled { background: var(--surface3); color: var(--muted2); border: 1px solid var(--border); cursor: default; }
 
-  /* Time inputs inline */
   .time-inline { display: flex; gap: 4px; align-items: center; }
   .time-inline input[type=time] { background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; color: var(--text); font-family: 'DM Sans', sans-serif; font-size: 12px; outline: none; width: 90px; }
   .time-inline input[type=time]:focus { border-color: var(--accent); }
@@ -302,7 +289,6 @@ while ($row = mysqli_fetch_assoc($vr)) $visitors[] = $row;
     <a class="tab <?= $active_tab === 'visitors'      ? 'active' : '' ?>" href="?tab=visitors">Visitor Requests</a>
   </div>
 
-  <!-- ── REGISTRATIONS TAB ── -->
   <?php if ($active_tab === 'registrations'): ?>
 
     <div class="stats-grid">
@@ -378,7 +364,6 @@ while ($row = mysqli_fetch_assoc($vr)) $visitors[] = $row;
       <?php endif; ?>
     </div>
 
-  <!-- ── VISITORS TAB ── -->
   <?php elseif ($active_tab === 'visitors'): ?>
 
     <div class="stats-grid">
