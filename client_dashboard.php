@@ -13,30 +13,67 @@ $client_name = $_SESSION['name'];
 $message     = "";
 $msg_type    = "";
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'request_visitor') {
-    $visitor_name  = trim($_POST['visitor_name'] ?? "");
-    $visitor_phone = trim($_POST['visitor_phone'] ?? "");
-    $requested     = trim($_POST['requested_time'] ?? "");
+// ── POST: request visitor ────────────────────────────────────────
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
 
-    if ($visitor_name === "") {
-        $message  = "Visitor name is required.";
-        $msg_type = "error";
-    } else {
-        $sql  = "INSERT INTO Visitors_log (Client_id, Visitor_Name, Visitor_Phone, Status, Requested_time)
-                 VALUES (?, ?, ?, 'Pending', ?)";
-        $stmt = mysqli_prepare($conn, $sql);
-        $req_time = $requested ?: null;
-        mysqli_stmt_bind_param($stmt, "isss", $client_id, $visitor_name, $visitor_phone, $req_time);
-        if (mysqli_stmt_execute($stmt)) {
-            $message  = "Visitor request submitted. Awaiting manager approval.";
-            $msg_type = "success";
-        } else {
-            $message  = "Failed to submit: " . mysqli_error($conn);
+    if ($_POST['action'] === 'request_visitor') {
+        $visitor_name  = trim($_POST['visitor_name'] ?? "");
+        $visitor_phone = trim($_POST['visitor_phone'] ?? "");
+        $requested     = trim($_POST['requested_time'] ?? "");
+
+        if ($visitor_name === "") {
+            $message  = "Visitor name is required.";
             $msg_type = "error";
+        } else {
+            $sql  = "INSERT INTO Visitors_log (Client_id, Visitor_Name, Visitor_Phone, Status, Requested_time)
+                     VALUES (?, ?, ?, 'Pending', ?)";
+            $stmt = mysqli_prepare($conn, $sql);
+            $req_time = $requested ?: null;
+            mysqli_stmt_bind_param($stmt, "isss", $client_id, $visitor_name, $visitor_phone, $req_time);
+            if (mysqli_stmt_execute($stmt)) {
+                $message  = "Visitor request submitted. Awaiting manager approval.";
+                $msg_type = "success";
+            } else {
+                $message  = "Failed to submit: " . mysqli_error($conn);
+                $msg_type = "error";
+            }
+        }
+    }
+
+    // ── POST: submit room booking request ───────────────────────
+    elseif ($_POST['action'] === 'book_room') {
+        $room_type_req  = trim($_POST['room_type_requested'] ?? "");
+        $preferred_date = trim($_POST['preferred_checkin'] ?? "") ?: date('Y-m-d');
+
+        if (!in_array($room_type_req, ['AC', 'Non-AC'])) {
+            $message  = "Please select a valid room type.";
+            $msg_type = "error";
+        } else {
+            // Check if client already has a pending or allocated booking
+            $chk = mysqli_prepare($conn, "SELECT Booking_ID, Booking_status FROM Booking_Allocation WHERE client_id = ? AND Booking_status IN ('Pending','Allocated') LIMIT 1");
+            mysqli_stmt_bind_param($chk, "i", $client_id);
+            mysqli_stmt_execute($chk);
+            $existing = mysqli_fetch_assoc(mysqli_stmt_get_result($chk));
+
+            if ($existing) {
+                $message  = "You already have a " . strtolower($existing['Booking_status']) . " booking request (Booking #" . $existing['Booking_ID'] . "). Please wait for it to be processed.";
+                $msg_type = "error";
+            } else {
+                $ins = mysqli_prepare($conn, "INSERT INTO Booking_Allocation (Room_type_requested, Booking_date, Check_in_date, Booking_status, client_id) VALUES (?, CURDATE(), ?, 'Pending', ?)");
+                mysqli_stmt_bind_param($ins, "ssi", $room_type_req, $preferred_date, $client_id);
+                if (mysqli_stmt_execute($ins)) {
+                    $message  = "Room booking request submitted successfully! A manager will allocate your room shortly.";
+                    $msg_type = "success";
+                } else {
+                    $message  = "Failed to submit booking: " . mysqli_error($conn);
+                    $msg_type = "error";
+                }
+            }
         }
     }
 }
 
+// ── Fetch client profile ─────────────────────────────────────────
 $sql  = "SELECT u.F_name, u.L_name, u.Email, u.Gender, u.D_birth,
                 u.Street, u.Area, u.Zip_code, p.Phone,
                 c.Status AS Account_Status, c.Guardian_name,
@@ -50,6 +87,7 @@ mysqli_stmt_bind_param($stmt, "i", $user_id);
 mysqli_stmt_execute($stmt);
 $client = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
 
+// ── Fetch visitor log ────────────────────────────────────────────
 $vsql  = "SELECT Visitor_ID, Visitor_Name, Visitor_Phone,
                  Status, Requested_time, Entry_time, Exit_time
           FROM Visitors_log WHERE Client_id = ? ORDER BY Visitor_ID DESC";
@@ -62,6 +100,97 @@ while ($row = mysqli_fetch_assoc($vres)) $visitor_rows[] = $row;
 
 $vc = ['Pending' => 0, 'Approved' => 0, 'Rejected' => 0];
 foreach ($visitor_rows as $v) { if (isset($vc[$v['Status']])) $vc[$v['Status']]++; }
+
+// ── Fetch client's bookings ──────────────────────────────────────
+$bsql  = "SELECT ba.Booking_ID, ba.Room_type_requested, ba.Booking_date,
+                 ba.Check_in_date, ba.Booking_status,
+                 ba.Floor_num, ba.Room_num, ba.Bed_num
+          FROM Booking_Allocation ba
+          WHERE ba.client_id = ?
+          ORDER BY ba.Booking_ID DESC";
+$bstmt = mysqli_prepare($conn, $bsql);
+mysqli_stmt_bind_param($bstmt, "i", $client_id);
+mysqli_stmt_execute($bstmt);
+$bres = mysqli_stmt_get_result($bstmt);
+$my_bookings = [];
+while ($row = mysqli_fetch_assoc($bres)) $my_bookings[] = $row;
+
+// Active booking (Pending or Allocated) for overview card
+$active_booking = null;
+foreach ($my_bookings as $b) {
+    if (in_array($b['Booking_status'], ['Pending', 'Allocated'])) {
+        $active_booking = $b;
+        break;
+    }
+}
+
+// ── Fetch room availability grid (read-only for client) ──────────
+$room_grid = [];
+$rg = mysqli_query($conn, "SELECT r.Floor_num, r.Room_num, r.Room_type, r.Capacity, r.Status,
+    (SELECT COUNT(*) FROM Stays_IN si WHERE si.Floor_NUM = r.Floor_num AND si.Room_NUm = r.Room_num) AS occupants
+    FROM Room r ORDER BY r.Floor_num, r.Room_num");
+while ($row = mysqli_fetch_assoc($rg)) $room_grid[$row['Floor_num']][$row['Room_num']] = $row;
+
+// Room availability counts
+$ac_avail  = 0; $ac_total  = 0;
+$nac_avail = 0; $nac_total = 0;
+foreach ($room_grid as $floor) {
+    foreach ($floor as $room) {
+        if ($room['Room_type'] === 'AC')     { $ac_total++;  if ($room['Status'] === 'Available') $ac_avail++;  }
+        if ($room['Room_type'] === 'Non-AC') { $nac_total++; if ($room['Status'] === 'Available') $nac_avail++; }
+    }
+}
+
+// ── Fetch client's Stays_IN record + full room details ────────────
+// A client has a Stays_IN row once the manager allocates & inserts it.
+$stays_sql = "SELECT
+        si.Floor_NUM        AS floor,
+        si.Room_NUm         AS room,
+        r.Room_type,
+        r.Capacity,
+        r.Status            AS room_status,
+        (SELECT COUNT(*) FROM Stays_IN s2
+         WHERE s2.Floor_NUM = si.Floor_NUM AND s2.Room_NUm = si.Room_NUm)
+                            AS total_occupants,
+        ba.Booking_ID,
+        ba.Bed_num,
+        ba.Check_in_date,
+        ba.Booking_status
+    FROM Stays_IN si
+    INNER JOIN Room r ON r.Floor_num = si.Floor_NUM AND r.Room_num = si.Room_NUm
+    LEFT  JOIN Booking_Allocation ba
+           ON  ba.client_id = si.client_id
+           AND ba.Floor_num  = si.Floor_NUM
+           AND ba.Room_num   = si.Room_NUm
+           AND ba.Booking_status = 'Allocated'
+    WHERE si.client_id = ?
+    LIMIT 1";
+$stays_stmt = mysqli_prepare($conn, $stays_sql);
+mysqli_stmt_bind_param($stays_stmt, "i", $client_id);
+mysqli_stmt_execute($stays_stmt);
+$my_room = mysqli_fetch_assoc(mysqli_stmt_get_result($stays_stmt));
+
+// Roommates: other clients in the same room (names only, no personal detail leak)
+$roommates = [];
+if ($my_room) {
+    $rm_sql  = "SELECT u.F_name, u.L_name, ba.Bed_num
+                FROM Stays_IN si
+                INNER JOIN Client  c  ON c.ID         = si.client_id
+                INNER JOIN `User`  u  ON u.ID         = c.Student_ID
+                LEFT  JOIN Booking_Allocation ba
+                       ON  ba.client_id      = si.client_id
+                       AND ba.Floor_num      = si.Floor_NUM
+                       AND ba.Room_num       = si.Room_NUm
+                       AND ba.Booking_status = 'Allocated'
+                WHERE si.Floor_NUM  = ?
+                  AND si.Room_NUm   = ?
+                  AND si.client_id != ?";
+    $rm_stmt = mysqli_prepare($conn, $rm_sql);
+    mysqli_stmt_bind_param($rm_stmt, "iii", $my_room['floor'], $my_room['room'], $client_id);
+    mysqli_stmt_execute($rm_stmt);
+    $rm_res = mysqli_stmt_get_result($rm_stmt);
+    while ($row = mysqli_fetch_assoc($rm_res)) $roommates[] = $row;
+}
 
 $active_tab = $_GET['tab'] ?? 'overview';
 ?>
@@ -86,6 +215,7 @@ $active_tab = $_GET['tab'] ?? 'overview';
   }
   body { font-family: 'DM Sans', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; display: flex; }
 
+  /* ── Sidebar ── */
   .sidebar { width: var(--sidebar); min-height: 100vh; background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; position: fixed; top: 0; left: 0; z-index: 100; }
   .sidebar-logo { padding: 1.5rem; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; }
   .logo-icon { width: 32px; height: 32px; background: var(--accent); border-radius: 7px; display: flex; align-items: center; justify-content: center; }
@@ -99,6 +229,7 @@ $active_tab = $_GET['tab'] ?? 'overview';
   .nav-item:hover { color: var(--text); background: var(--surface2); }
   .nav-item.active { color: var(--accent); background: rgba(201,169,110,.08); }
   .nbadge { margin-left: auto; background: var(--pending); color: #0f0e0c; font-size: 10px; font-weight: 600; border-radius: 20px; padding: 1px 7px; }
+  .nbadge-green { margin-left: auto; background: var(--approved); color: #0f0e0c; font-size: 10px; font-weight: 600; border-radius: 20px; padding: 1px 7px; }
   .sidebar-footer { padding: 1rem 1.25rem; border-top: 1px solid var(--border); }
   .user-chip { display: flex; align-items: center; gap: 10px; padding: .6rem .75rem; background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); }
   .avatar { width: 30px; height: 30px; background: var(--accent); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; color: #0f0e0c; flex-shrink: 0; }
@@ -108,12 +239,13 @@ $active_tab = $_GET['tab'] ?? 'overview';
   .logout-btn { font-size: 11px; color: var(--muted); text-decoration: none; display: block; text-align: center; margin-top: .75rem; transition: color .15s; }
   .logout-btn:hover { color: var(--rejected); }
 
+  /* ── Main ── */
   .main { margin-left: var(--sidebar); flex: 1; padding: 2rem; }
   .page-title { font-family: 'DM Serif Display', serif; font-size: 24px; font-weight: 400; }
   .page-sub   { font-size: 13px; color: var(--muted); margin-top: 2px; margin-bottom: 1.75rem; }
 
-  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 2rem; }
-  .tab { padding: .6rem 1.1rem; font-size: 13px; font-weight: 500; color: var(--muted); text-decoration: none; border-bottom: 2px solid transparent; margin-bottom: -1px; transition: color .15s, border-color .15s; }
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 2rem; flex-wrap: wrap; }
+  .tab { padding: .6rem 1.1rem; font-size: 13px; font-weight: 500; color: var(--muted); text-decoration: none; border-bottom: 2px solid transparent; margin-bottom: -1px; transition: color .15s, border-color .15s; white-space: nowrap; }
   .tab:hover { color: var(--text); }
   .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
 
@@ -126,6 +258,7 @@ $active_tab = $_GET['tab'] ?? 'overview';
   .status-banner.pending  { background: var(--pending-bg);  border: 1px solid rgba(201,169,110,.3); color: var(--pending); }
   .status-banner.rejected { background: var(--rejected-bg); border: 1px solid rgba(212,101,90,.3);  color: var(--rejected); }
 
+  /* ── Cards ── */
   .cards-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
   .info-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.5rem; }
   .info-card h3 { font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); margin-bottom: 1rem; padding-bottom: .6rem; border-bottom: 1px solid var(--border); }
@@ -133,23 +266,31 @@ $active_tab = $_GET['tab'] ?? 'overview';
   .info-row:last-child { margin-bottom: 0; }
   .info-label { color: var(--muted); flex-shrink: 0; }
   .info-value { font-weight: 500; text-align: right; }
+  .info-value.pending  { color: var(--pending); }
+  .info-value.approved { color: var(--approved); }
+  .info-value.allocated { color: var(--approved); }
+  .info-value.rejected { color: var(--rejected); }
 
+  /* ── Visitor stats ── */
   .vstats { display: flex; gap: .75rem; margin-bottom: 1.5rem; }
   .vstat  { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: .75rem 1.25rem; flex: 1; }
   .vstat-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 4px; }
   .vstat-val   { font-family: 'DM Serif Display', serif; font-size: 26px; line-height: 1; }
   .vstat-val.p { color: var(--pending); } .vstat-val.a { color: var(--approved); } .vstat-val.r { color: var(--rejected); }
 
+  /* ── Request form (visitors) ── */
   .request-form-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.5rem; margin-bottom: 1.5rem; }
   .request-form-wrap h3 { font-size: 13px; font-weight: 600; color: var(--accent); margin-bottom: 1.25rem; }
   .form-row { display: grid; grid-template-columns: 1fr 1fr 1fr auto; gap: .75rem; align-items: flex-end; }
   .field label { display: block; font-size: 11px; font-weight: 500; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 6px; }
-  .field input  { width: 100%; background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); padding: 9px 12px; color: var(--text); font-family: 'DM Sans', sans-serif; font-size: 13.5px; outline: none; transition: border-color .2s; }
-  .field input:focus { border-color: var(--accent); }
+  .field input, .field select  { width: 100%; background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); padding: 9px 12px; color: var(--text); font-family: 'DM Sans', sans-serif; font-size: 13.5px; outline: none; transition: border-color .2s; appearance: none; }
+  .field input:focus, .field select:focus { border-color: var(--accent); }
   .field input::placeholder { color: var(--muted2); }
+  .field select option { background: var(--surface2); }
   .submit-btn { padding: 9px 18px; background: var(--accent); color: #0f0e0c; border: none; border-radius: var(--radius); font-family: 'DM Sans', sans-serif; font-size: 13px; font-weight: 600; cursor: pointer; white-space: nowrap; transition: background .2s; }
   .submit-btn:hover { background: var(--accent2); }
 
+  /* ── Tables ── */
   .table-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
   table { width: 100%; border-collapse: collapse; }
   thead th { padding: .7rem 1.25rem; text-align: left; font-size: 11px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); background: var(--surface2); border-bottom: 1px solid var(--border); }
@@ -161,11 +302,151 @@ $active_tab = $_GET['tab'] ?? 'overview';
   .fw500 { font-weight: 500; }
 
   .badge { display: inline-flex; align-items: center; padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; }
-  .badge-pending  { background: var(--pending-bg);  color: var(--pending);  }
-  .badge-approved { background: var(--approved-bg); color: var(--approved); }
-  .badge-rejected { background: var(--rejected-bg); color: var(--rejected); }
+  .badge-pending   { background: var(--pending-bg);  color: var(--pending);  }
+  .badge-approved  { background: var(--approved-bg); color: var(--approved); }
+  .badge-rejected  { background: var(--rejected-bg); color: var(--rejected); }
+  .badge-allocated { background: var(--approved-bg); color: var(--approved); }
+  .badge-ac    { background: rgba(100,160,220,.12); color: #78b4e0; border: 1px solid rgba(100,160,220,.25); }
+  .badge-nonac { background: rgba(160,130,200,.12); color: #b49ad4; border: 1px solid rgba(160,130,200,.25); }
 
   .empty-state { text-align: center; padding: 3rem 2rem; color: var(--muted); font-size: 13px; }
+
+  /* ── Room Booking tab ── */
+  .booking-section { display: grid; grid-template-columns: 380px 1fr; gap: 1.5rem; align-items: start; }
+  .booking-form-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.75rem; }
+  .booking-form-card h3 { font-size: 13px; font-weight: 600; color: var(--accent); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 1.5rem; padding-bottom: .75rem; border-bottom: 1px solid var(--border); }
+  .booking-field { margin-bottom: 1.1rem; }
+  .booking-field label { display: block; font-size: 11px; font-weight: 500; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 6px; }
+  .booking-field input, .booking-field select { width: 100%; background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px; color: var(--text); font-family: 'DM Sans', sans-serif; font-size: 13.5px; outline: none; transition: border-color .2s; appearance: none; }
+  .booking-field input:focus, .booking-field select:focus { border-color: var(--accent); }
+  .booking-field select option { background: var(--surface2); }
+  .booking-submit { width: 100%; padding: 11px; background: var(--accent); color: #0f0e0c; border: none; border-radius: var(--radius); font-family: 'DM Sans', sans-serif; font-size: 14px; font-weight: 600; cursor: pointer; margin-top: .5rem; transition: background .2s; }
+  .booking-submit:hover { background: var(--accent2); }
+  .booking-submit:disabled { background: var(--surface3); color: var(--muted2); cursor: not-allowed; }
+
+  /* room type toggle */
+  .type-toggle { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 1.1rem; }
+  .type-option { position: relative; }
+  .type-option input[type=radio] { position: absolute; opacity: 0; width: 0; height: 0; }
+  .type-label {
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+    padding: 1rem .5rem; background: var(--surface2); border: 1px solid var(--border);
+    border-radius: var(--radius); cursor: pointer; transition: all .2s; text-align: center;
+  }
+  .type-label .tl-icon { font-size: 20px; }
+  .type-label .tl-name { font-size: 13px; font-weight: 600; }
+  .type-label .tl-desc { font-size: 11px; color: var(--muted); }
+  .type-option input[type=radio]:checked + .type-label {
+    background: rgba(201,169,110,.1); border-color: var(--accent); color: var(--accent);
+  }
+  .type-option input[type=radio]:checked + .type-label .tl-desc { color: var(--pending); }
+
+  /* availability panel */
+  .avail-panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.5rem; }
+  .avail-panel h3 { font-size: 13px; font-weight: 600; color: var(--accent); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 1.25rem; padding-bottom: .75rem; border-bottom: 1px solid var(--border); }
+  .avail-summary { display: grid; grid-template-columns: 1fr 1fr; gap: .75rem; margin-bottom: 1.5rem; }
+  .avail-stat { background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem 1.25rem; }
+  .avail-stat-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 4px; }
+  .avail-stat-val { font-family: 'DM Serif Display', serif; font-size: 24px; line-height: 1; }
+  .avail-stat-val.g { color: var(--approved); }
+  .avail-stat-sub { font-size: 11px; color: var(--muted2); margin-top: 3px; }
+
+  /* floor mini-grid */
+  .floor-filter { display: flex; gap: 6px; margin-bottom: 1rem; flex-wrap: wrap; }
+  .floor-pill { padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 500; border: 1px solid var(--border); color: var(--muted); background: var(--surface2); cursor: pointer; transition: all .15s; }
+  .floor-pill.active, .floor-pill:hover { border-color: var(--accent); color: var(--accent); background: rgba(201,169,110,.08); }
+  .floor-section { margin-bottom: 1.25rem; }
+  .floor-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); margin-bottom: .6rem; }
+  .room-cells { display: grid; grid-template-columns: repeat(10, 1fr); gap: .35rem; }
+  .room-cell {
+    background: var(--surface2); border: 1px solid var(--border); border-radius: 5px;
+    padding: .35rem .15rem; text-align: center; position: relative;
+  }
+  .room-cell.available  { border-color: rgba(109,171,126,.3); }
+  .room-cell.full       { background: rgba(212,101,90,.07); border-color: rgba(212,101,90,.3); }
+  .room-cell.unavailable { background: var(--surface3); opacity: .5; }
+  .rc-num  { font-size: 11px; font-weight: 600; }
+  .rc-occ  { font-size: 9px; color: var(--muted); margin-top: 1px; }
+  .rc-type { font-size: 8px; color: var(--muted2); }
+  .rc-dot  { width: 5px; height: 5px; border-radius: 50%; margin: 2px auto 0; background: var(--muted2); }
+  .rc-dot.g { background: var(--approved); }
+  .rc-dot.y { background: var(--pending);  }
+  .rc-dot.r { background: var(--rejected); }
+  .room-legend { display: flex; gap: .75rem; flex-wrap: wrap; margin-top: 1rem; }
+  .legend-item { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); }
+  .legend-dot { width: 7px; height: 7px; border-radius: 50%; }
+
+  /* active booking alert */
+  .booking-alert { background: var(--pending-bg); border: 1px solid rgba(201,169,110,.3); border-radius: var(--radius); padding: 1rem 1.25rem; margin-bottom: 1.5rem; }
+  .booking-alert.allocated { background: var(--approved-bg); border-color: rgba(109,171,126,.3); }
+  .booking-alert-title { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--pending); margin-bottom: .5rem; }
+  .booking-alert.allocated .booking-alert-title { color: var(--approved); }
+  .booking-alert-body { font-size: 13.5px; display: flex; flex-wrap: wrap; gap: .75rem 2rem; }
+  .booking-alert-item { display: flex; flex-direction: column; gap: 2px; }
+  .booking-alert-item span:first-child { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+  .booking-alert-item span:last-child  { font-weight: 500; }
+
+  /* My Bookings tab */
+  .bookings-header { margin-bottom: 1.25rem; }
+  .section-title { font-size: 13px; font-weight: 600; color: var(--accent); text-transform: uppercase; letter-spacing: .08em; }
+  .room-detail-chip { display: inline-flex; align-items: center; gap: 5px; background: var(--approved-bg); border: 1px solid rgba(109,171,126,.25); border-radius: 6px; padding: 4px 10px; font-size: 12px; color: var(--approved); font-weight: 500; }
+
+  /* ── My Room tab ── */
+  .room-hero { display: flex; align-items: center; justify-content: space-between; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.5rem 1.75rem; margin-bottom: 1.25rem; }
+  .room-hero-left { display: flex; align-items: center; gap: 1.25rem; }
+  .room-hero-icon { font-size: 36px; line-height: 1; }
+  .room-hero-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin-bottom: 3px; }
+  .room-hero-title { font-family: 'DM Serif Display', serif; font-size: 26px; font-weight: 400; line-height: 1.1; }
+  .room-hero-sub { font-size: 13px; color: var(--muted); margin-top: 3px; }
+  .room-status-badge { padding: 5px 14px; border-radius: 20px; font-size: 12px; font-weight: 600; }
+  .rs-avail { background: var(--approved-bg); border: 1px solid rgba(109,171,126,.3); color: var(--approved); }
+  .rs-full  { background: var(--rejected-bg); border: 1px solid rgba(212,101,90,.3);  color: var(--rejected); }
+
+  .room-stats-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin-bottom: 1.25rem; }
+  .room-stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem 1.25rem; display: flex; align-items: center; gap: .875rem; }
+  .room-stat-icon { font-size: 22px; flex-shrink: 0; }
+  .room-stat-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 2px; }
+  .room-stat-val { font-family: 'DM Serif Display', serif; font-size: 22px; line-height: 1; }
+
+  .room-detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+
+  /* Occupancy bar */
+  .occ-bar-track { background: var(--surface3); border-radius: 4px; height: 6px; overflow: hidden; }
+  .occ-bar-fill { height: 100%; border-radius: 4px; transition: width .4s ease; }
+  .occ-bar-fill.low  { background: var(--approved); }
+  .occ-bar-fill.mid  { background: var(--pending);  }
+  .occ-bar-fill.full { background: var(--rejected);  }
+
+  /* Bed map */
+  .bed-map { display: flex; gap: .5rem; flex-wrap: wrap; margin-bottom: .5rem; }
+  .bed-cell { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: .6rem .8rem; border-radius: 8px; border: 1px solid var(--border); min-width: 56px; text-align: center; }
+  .bed-cell.bed-mine  { background: rgba(201,169,110,.12); border-color: var(--accent); }
+  .bed-cell.bed-taken { background: rgba(212,101,90,.08);  border-color: rgba(212,101,90,.3); }
+  .bed-cell.bed-free  { background: var(--surface2); }
+  .bed-icon { font-size: 18px; }
+  .bed-num  { font-size: 11px; font-weight: 600; color: var(--text); }
+  .bed-tag  { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--accent); }
+  .bed-legend { display: flex; gap: 1rem; font-size: 11px; color: var(--muted); margin-top: .4rem; }
+  .bed-legend-item { display: flex; align-items: center; gap: 5px; }
+  .bed-dot { width: 8px; height: 8px; border-radius: 50%; }
+  .bed-dot.mine  { background: var(--accent); }
+  .bed-dot.taken { background: var(--rejected); }
+  .bed-dot.free  { background: var(--muted2); }
+
+  /* Roommates */
+  .roommate-row { display: flex; align-items: center; gap: .75rem; padding: .6rem .75rem; background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); }
+  .rm-avatar { width: 32px; height: 32px; background: var(--surface3); border: 1px solid var(--border2); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 600; color: var(--accent); flex-shrink: 0; }
+  .rm-name { font-size: 13.5px; font-weight: 500; }
+  .rm-bed  { font-size: 11px; color: var(--muted); }
+
+  /* Building visual */
+  .building-visual { display: flex; flex-direction: column; gap: 3px; }
+  .bv-floor { display: flex; align-items: center; gap: 6px; padding: 3px 0; }
+  .bv-floor.bv-current .bv-floor-label { color: var(--accent); font-weight: 700; }
+  .bv-floor-label { font-size: 10px; font-weight: 500; color: var(--muted2); width: 20px; flex-shrink: 0; text-align: right; }
+  .bv-rooms { display: flex; gap: 2px; }
+  .bv-room { width: 9px; height: 12px; background: var(--surface3); border: 1px solid var(--border); border-radius: 1px; }
+  .bv-room.bv-mine { background: var(--accent); border-color: var(--accent2); }
 </style>
 </head>
 <body>
@@ -185,6 +466,20 @@ $active_tab = $_GET['tab'] ?? 'overview';
     <a class="nav-item <?= $active_tab === 'overview' ? 'active' : '' ?>" href="?tab=overview">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
       Overview
+    </a>
+    <a class="nav-item <?= $active_tab === 'room' ? 'active' : '' ?>" href="?tab=room">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><path d="M9 22V12h6v10"/></svg>
+      Room Booking
+      <?php if ($active_booking && $active_booking['Booking_status'] === 'Pending'): ?>
+        <span class="nbadge">1</span>
+      <?php elseif ($active_booking && $active_booking['Booking_status'] === 'Allocated'): ?>
+        <span class="nbadge-green">✓</span>
+      <?php endif; ?>
+    </a>
+    <a class="nav-item <?= $active_tab === 'my_room' ? 'active' : '' ?>" href="?tab=my_room">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v2"/><line x1="12" y1="12" x2="12" y2="16"/><line x1="10" y1="14" x2="14" y2="14"/></svg>
+      My Room
+      <?php if ($my_room): ?><span class="nbadge-green">✓</span><?php endif; ?>
     </a>
     <a class="nav-item <?= $active_tab === 'visitors' ? 'active' : '' ?>" href="?tab=visitors">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>
@@ -214,9 +509,12 @@ $active_tab = $_GET['tab'] ?? 'overview';
 
   <div class="tabs">
     <a class="tab <?= $active_tab === 'overview' ? 'active' : '' ?>" href="?tab=overview">Overview</a>
+    <a class="tab <?= $active_tab === 'room'     ? 'active' : '' ?>" href="?tab=room">Room Booking</a>
+    <a class="tab <?= $active_tab === 'my_room'  ? 'active' : '' ?>" href="?tab=my_room">My Room</a>
     <a class="tab <?= $active_tab === 'visitors' ? 'active' : '' ?>" href="?tab=visitors">Visitors</a>
   </div>
 
+  <?php /* ══════════════════ OVERVIEW ══════════════════ */ ?>
   <?php if ($active_tab === 'overview'): ?>
     <?php
     $status = $client['Account_Status'];
@@ -229,6 +527,41 @@ $active_tab = $_GET['tab'] ?? 'overview';
     <div class="status-banner <?= strtolower($status) ?>">
       <strong><?= $status ?>:</strong>&nbsp;<?= $msgs[$status] ?? '' ?>
     </div>
+
+    <?php if ($active_booking): ?>
+      <div class="booking-alert <?= $active_booking['Booking_status'] === 'Allocated' ? 'allocated' : '' ?>">
+        <div class="booking-alert-title">
+          <?= $active_booking['Booking_status'] === 'Allocated' ? '✓ Room Allocated' : '⏳ Room Booking Pending' ?>
+        </div>
+        <div class="booking-alert-body">
+          <div class="booking-alert-item">
+            <span>Booking #</span><span>#<?= $active_booking['Booking_ID'] ?></span>
+          </div>
+          <div class="booking-alert-item">
+            <span>Type</span><span><?= htmlspecialchars($active_booking['Room_type_requested']) ?></span>
+          </div>
+          <div class="booking-alert-item">
+            <span>Booked on</span><span><?= date('d M Y', strtotime($active_booking['Booking_date'])) ?></span>
+          </div>
+          <?php if ($active_booking['Booking_status'] === 'Allocated'): ?>
+            <div class="booking-alert-item">
+              <span>Room</span>
+              <span>Floor <?= $active_booking['Floor_num'] ?>, Room <?= $active_booking['Room_num'] ?>, Bed <?= $active_booking['Bed_num'] ?></span>
+            </div>
+            <?php if ($active_booking['Check_in_date']): ?>
+            <div class="booking-alert-item">
+              <span>Check-in</span><span><?= date('d M Y', strtotime($active_booking['Check_in_date'])) ?></span>
+            </div>
+            <?php endif; ?>
+          <?php else: ?>
+            <div class="booking-alert-item">
+              <span>Status</span><span style="color:var(--pending)">Awaiting manager allocation</span>
+            </div>
+          <?php endif; ?>
+        </div>
+      </div>
+    <?php endif; ?>
+
     <div class="cards-grid">
       <div class="info-card">
         <h3>Personal info</h3>
@@ -238,11 +571,13 @@ $active_tab = $_GET['tab'] ?? 'overview';
         <?php if ($client['Gender']): ?><div class="info-row"><span class="info-label">Gender</span><span class="info-value"><?= htmlspecialchars($client['Gender']) ?></span></div><?php endif; ?>
         <?php if ($client['D_birth']): ?><div class="info-row"><span class="info-label">Date of birth</span><span class="info-value"><?= date('d M Y', strtotime($client['D_birth'])) ?></span></div><?php endif; ?>
       </div>
+
       <div class="info-card">
         <h3>Guardian info</h3>
         <div class="info-row"><span class="info-label">Name</span><span class="info-value"><?= htmlspecialchars($client['Guardian_name']) ?></span></div>
         <?php if ($client['Guardian_Phone']): ?><div class="info-row"><span class="info-label">Phone</span><span class="info-value"><?= htmlspecialchars($client['Guardian_Phone']) ?></span></div><?php endif; ?>
       </div>
+
       <?php if ($client['Street'] || $client['Area'] || $client['Zip_code']): ?>
       <div class="info-card">
         <h3>Address</h3>
@@ -251,6 +586,7 @@ $active_tab = $_GET['tab'] ?? 'overview';
         <?php if ($client['Zip_code']): ?><div class="info-row"><span class="info-label">ZIP</span><span class="info-value"><?= htmlspecialchars($client['Zip_code']) ?></span></div><?php endif; ?>
       </div>
       <?php endif; ?>
+
       <div class="info-card">
         <h3>Account status</h3>
         <div class="info-row"><span class="info-label">Client ID</span><span class="info-value">#<?= $client_id ?></span></div>
@@ -258,9 +594,463 @@ $active_tab = $_GET['tab'] ?? 'overview';
         <?php if ($client['Approval_Date']): ?><div class="info-row"><span class="info-label">Decision date</span><span class="info-value"><?= date('d M Y', strtotime($client['Approval_Date'])) ?></span></div><?php endif; ?>
         <div class="info-row"><span class="info-label">Visitors pending</span><span class="info-value"><?= $vc['Pending'] ?></span></div>
         <div class="info-row"><span class="info-label">Visitors approved</span><span class="info-value"><?= $vc['Approved'] ?></span></div>
+        <?php if ($active_booking): ?>
+        <div class="info-row">
+          <span class="info-label">Room booking</span>
+          <span class="info-value <?= strtolower($active_booking['Booking_status']) ?>"><?= $active_booking['Booking_status'] ?></span>
+        </div>
+        <?php endif; ?>
+        <?php if ($my_room): ?>
+        <div class="info-row">
+          <span class="info-label">Room assigned</span>
+          <span class="info-value approved">Floor <?= $my_room['floor'] ?> · Room <?= $my_room['room'] ?></span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Bed number</span>
+          <span class="info-value"><?= $my_room['Bed_num'] ?? '—' ?></span>
+        </div>
+        <?php endif; ?>
       </div>
     </div>
 
+  <?php /* ══════════════════ ROOM BOOKING ══════════════════ */ ?>
+  <?php elseif ($active_tab === 'room'): ?>
+
+    <?php if ($client['Account_Status'] !== 'Approved'): ?>
+      <div class="status-banner pending">
+        ⏳ Room booking is only available for approved clients. Your account is currently <strong><?= $client['Account_Status'] ?></strong>.
+      </div>
+
+    <?php else: ?>
+
+      <?php if ($active_booking && $active_booking['Booking_status'] === 'Pending'): ?>
+        <div class="booking-alert" style="margin-bottom:1.5rem;">
+          <div class="booking-alert-title">⏳ Booking Request Pending</div>
+          <div class="booking-alert-body">
+            <div class="booking-alert-item"><span>Booking #</span><span>#<?= $active_booking['Booking_ID'] ?></span></div>
+            <div class="booking-alert-item"><span>Type requested</span><span><?= htmlspecialchars($active_booking['Room_type_requested']) ?></span></div>
+            <div class="booking-alert-item"><span>Submitted</span><span><?= date('d M Y', strtotime($active_booking['Booking_date'])) ?></span></div>
+            <div class="booking-alert-item"><span>Preferred check-in</span><span><?= $active_booking['Check_in_date'] ? date('d M Y', strtotime($active_booking['Check_in_date'])) : '—' ?></span></div>
+          </div>
+          <div style="margin-top:.75rem; font-size:12.5px; color:var(--muted);">
+            A manager will review your request and allocate a room. You will see the details here once allocated.
+          </div>
+        </div>
+      <?php endif; ?>
+
+      <?php if ($active_booking && $active_booking['Booking_status'] === 'Allocated'): ?>
+        <div class="booking-alert allocated" style="margin-bottom:1.5rem;">
+          <div class="booking-alert-title">✓ Room Allocated</div>
+          <div class="booking-alert-body">
+            <div class="booking-alert-item"><span>Floor</span><span><?= $active_booking['Floor_num'] ?></span></div>
+            <div class="booking-alert-item"><span>Room</span><span><?= $active_booking['Room_num'] ?></span></div>
+            <div class="booking-alert-item"><span>Bed</span><span><?= $active_booking['Bed_num'] ?></span></div>
+            <div class="booking-alert-item"><span>Type</span><span><?= htmlspecialchars($active_booking['Room_type_requested']) ?></span></div>
+            <?php if ($active_booking['Check_in_date']): ?>
+            <div class="booking-alert-item"><span>Check-in</span><span><?= date('d M Y', strtotime($active_booking['Check_in_date'])) ?></span></div>
+            <?php endif; ?>
+          </div>
+        </div>
+      <?php endif; ?>
+
+      <div class="booking-section">
+
+        <!-- LEFT: booking form -->
+        <div>
+          <div class="booking-form-card">
+            <h3><?= ($active_booking && in_array($active_booking['Booking_status'], ['Pending','Allocated'])) ? 'Booking History' : 'Book a Room' ?></h3>
+
+            <?php if (!$active_booking || !in_array($active_booking['Booking_status'], ['Pending','Allocated'])): ?>
+              <form method="POST" action="?tab=room">
+                <input type="hidden" name="action" value="book_room">
+
+                <div style="margin-bottom:1.1rem;">
+                  <div style="font-size:11px;font-weight:500;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px;">Room type</div>
+                  <div class="type-toggle">
+                    <div class="type-option">
+                      <input type="radio" name="room_type_requested" id="type_ac" value="AC" required>
+                      <label for="type_ac" class="type-label">
+                        <span class="tl-icon">❄️</span>
+                        <span class="tl-name">AC</span>
+                        <span class="tl-desc">Air conditioned · <?= $ac_avail ?> available</span>
+                      </label>
+                    </div>
+                    <div class="type-option">
+                      <input type="radio" name="room_type_requested" id="type_nonac" value="Non-AC" required>
+                      <label for="type_nonac" class="type-label">
+                        <span class="tl-icon">🌀</span>
+                        <span class="tl-name">Non-AC</span>
+                        <span class="tl-desc">Fan room · <?= $nac_avail ?> available</span>
+                      </label>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="booking-field">
+                  <label>Preferred check-in date</label>
+                  <input type="date" name="preferred_checkin" value="<?= date('Y-m-d') ?>" min="<?= date('Y-m-d') ?>">
+                </div>
+
+                <button type="submit" class="booking-submit" onclick="return confirm('Submit room booking request?')">
+                  Submit Booking Request
+                </button>
+              </form>
+
+            <?php else: ?>
+              <p style="font-size:13px;color:var(--muted);line-height:1.6;">
+                You have an active booking request. Once processed, you can find your full booking history in the table below.
+              </p>
+            <?php endif; ?>
+          </div>
+
+          <!-- My booking history -->
+          <?php if (!empty($my_bookings)): ?>
+          <div style="margin-top:1.25rem;">
+            <div class="bookings-header"><div class="section-title">My Booking History</div></div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Type</th>
+                    <th>Booked</th>
+                    <th>Check-in</th>
+                    <th>Room</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <?php foreach ($my_bookings as $b): ?>
+                  <tr>
+                    <td class="cell-muted"><?= $b['Booking_ID'] ?></td>
+                    <td>
+                      <span class="badge <?= $b['Room_type_requested'] === 'AC' ? 'badge-ac' : 'badge-nonac' ?>">
+                        <?= htmlspecialchars($b['Room_type_requested']) ?>
+                      </span>
+                    </td>
+                    <td class="cell-muted"><?= date('d M Y', strtotime($b['Booking_date'])) ?></td>
+                    <td class="cell-muted"><?= $b['Check_in_date'] ? date('d M Y', strtotime($b['Check_in_date'])) : '—' ?></td>
+                    <td>
+                      <?php if ($b['Booking_status'] === 'Allocated'): ?>
+                        <span class="room-detail-chip">F<?= $b['Floor_num'] ?> · R<?= $b['Room_num'] ?> · B<?= $b['Bed_num'] ?></span>
+                      <?php else: ?>
+                        <span class="cell-muted">—</span>
+                      <?php endif; ?>
+                    </td>
+                    <td><span class="badge badge-<?= strtolower($b['Booking_status']) ?>"><?= $b['Booking_status'] ?></span></td>
+                  </tr>
+                  <?php endforeach; ?>
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <?php endif; ?>
+        </div>
+
+        <!-- RIGHT: room availability viewer -->
+        <div class="avail-panel">
+          <h3>Room Availability</h3>
+
+          <div class="avail-summary">
+            <div class="avail-stat">
+              <div class="avail-stat-label">❄️ AC Rooms</div>
+              <div class="avail-stat-val g"><?= $ac_avail ?></div>
+              <div class="avail-stat-sub">available of <?= $ac_total ?> total</div>
+            </div>
+            <div class="avail-stat">
+              <div class="avail-stat-label">🌀 Non-AC Rooms</div>
+              <div class="avail-stat-val g"><?= $nac_avail ?></div>
+              <div class="avail-stat-sub">available of <?= $nac_total ?> total</div>
+            </div>
+          </div>
+
+          <?php if (empty($room_grid)): ?>
+            <div class="empty-state">No rooms have been configured yet. Please check back later.</div>
+          <?php else: ?>
+            <div class="floor-filter" id="floorFilter">
+              <span class="floor-pill active" onclick="filterFloor('all', this)">All Floors</span>
+              <?php for ($fl = 1; $fl <= 6; $fl++): ?>
+                <?php if (!empty($room_grid[$fl])): ?>
+                  <span class="floor-pill" onclick="filterFloor(<?= $fl ?>, this)">Floor <?= $fl ?></span>
+                <?php endif; ?>
+              <?php endfor; ?>
+            </div>
+
+            <?php for ($fl = 1; $fl <= 6; $fl++): ?>
+              <?php if (empty($room_grid[$fl])) continue; ?>
+              <div class="floor-section" data-floor="<?= $fl ?>">
+                <div class="floor-label">
+                  Floor <?= $fl ?>
+                  &nbsp;·&nbsp;
+                  AC: <?= array_reduce(array_filter($room_grid[$fl], fn($r) => $r['Room_type'] === 'AC' && $r['Status'] === 'Available'), fn($c) => $c + 1, 0) ?> avail
+                  &nbsp;·&nbsp;
+                  Non-AC: <?= array_reduce(array_filter($room_grid[$fl], fn($r) => $r['Room_type'] === 'Non-AC' && $r['Status'] === 'Available'), fn($c) => $c + 1, 0) ?> avail
+                </div>
+                <div class="room-cells">
+                  <?php foreach ($room_grid[$fl] as $rm => $cell):
+                    $occ = $cell['occupants']; $cap = $cell['Capacity'];
+                    $is_full = ($occ >= $cap) || $cell['Status'] === 'Unavailable';
+                    $partial = ($occ > 0 && $occ < $cap);
+                    $cell_cls = $is_full ? 'full' : ($cell['Status'] === 'Unavailable' ? 'unavailable' : 'available');
+                    $dot_cls  = $is_full ? 'r' : ($partial ? 'y' : 'g');
+                    $type_short = $cell['Room_type'] === 'AC' ? 'AC' : 'N-AC';
+                    $tooltip = "Floor $fl · Room $rm · {$cell['Room_type']} · $occ/$cap occupied · {$cell['Status']}";
+                  ?>
+                    <div class="room-cell <?= $cell_cls ?>" title="<?= htmlspecialchars($tooltip) ?>">
+                      <div class="rc-num"><?= $rm ?></div>
+                      <div class="rc-occ"><?= $occ ?>/<?= $cap ?></div>
+                      <div class="rc-type"><?= $type_short ?></div>
+                      <div class="rc-dot <?= $dot_cls ?>"></div>
+                    </div>
+                  <?php endforeach; ?>
+                </div>
+              </div>
+            <?php endfor; ?>
+
+            <div class="room-legend">
+              <div class="legend-item"><div class="legend-dot" style="background:var(--approved)"></div>Available</div>
+              <div class="legend-item"><div class="legend-dot" style="background:var(--pending)"></div>Partially occupied</div>
+              <div class="legend-item"><div class="legend-dot" style="background:var(--rejected)"></div>Full / Unavailable</div>
+            </div>
+          <?php endif; ?>
+        </div>
+      </div>
+    <?php endif; ?>
+
+  <?php /* ══════════════════ MY ROOM ══════════════════ */ ?>
+  <?php elseif ($active_tab === 'my_room'): ?>
+
+    <?php if (!$my_room): ?>
+      <?php if ($client['Account_Status'] !== 'Approved'): ?>
+        <div class="status-banner pending">
+          ⏳ Your account is not yet approved. Room assignment information will appear here once your account is approved and a room is allocated by a manager.
+        </div>
+      <?php elseif (!$active_booking): ?>
+        <div class="status-banner pending">
+          🏠 You haven't submitted a room booking request yet.
+          <a href="?tab=room" style="color:var(--accent);font-weight:600;margin-left:6px;">Book a room →</a>
+        </div>
+      <?php elseif ($active_booking['Booking_status'] === 'Pending'): ?>
+        <div class="status-banner pending">
+          ⏳ Your booking request (#<?= $active_booking['Booking_ID'] ?>) is pending. A manager will assign your room shortly. Check back here once allocated.
+        </div>
+      <?php else: ?>
+        <div class="status-banner pending">
+          ⏳ No room assignment found yet. Please contact management if this persists after your booking was marked Allocated.
+        </div>
+      <?php endif; ?>
+
+    <?php else: ?>
+
+      <?php
+        $occ      = $my_room['total_occupants'];
+        $cap      = $my_room['Capacity'];
+        $free     = max(0, $cap - $occ);
+        $pct      = $cap > 0 ? round(($occ / $cap) * 100) : 0;
+        $type     = $my_room['Room_type'];
+        $is_ac    = $type === 'AC';
+        $type_icon = $is_ac ? '❄️' : '🌀';
+      ?>
+
+      <!-- Room identity hero card -->
+      <div class="room-hero">
+        <div class="room-hero-left">
+          <div class="room-hero-icon"><?= $type_icon ?></div>
+          <div>
+            <div class="room-hero-label">Your Room</div>
+            <div class="room-hero-title">Floor <?= $my_room['floor'] ?> · Room <?= $my_room['room'] ?></div>
+            <div class="room-hero-sub"><?= htmlspecialchars($type) ?> · Bed #<?= $my_room['Bed_num'] ?? '—' ?></div>
+          </div>
+        </div>
+        <div class="room-hero-right">
+          <div class="room-status-badge <?= $my_room['room_status'] === 'Available' ? 'rs-avail' : 'rs-full' ?>">
+            <?= $my_room['room_status'] ?>
+          </div>
+        </div>
+      </div>
+
+      <!-- Stats row -->
+      <div class="room-stats-row">
+        <div class="room-stat-card">
+          <div class="room-stat-icon">🏠</div>
+          <div class="room-stat-body">
+            <div class="room-stat-label">Floor</div>
+            <div class="room-stat-val"><?= $my_room['floor'] ?></div>
+          </div>
+        </div>
+        <div class="room-stat-card">
+          <div class="room-stat-icon">🚪</div>
+          <div class="room-stat-body">
+            <div class="room-stat-label">Room Number</div>
+            <div class="room-stat-val"><?= $my_room['room'] ?></div>
+          </div>
+        </div>
+        <div class="room-stat-card">
+          <div class="room-stat-icon">🛏️</div>
+          <div class="room-stat-body">
+            <div class="room-stat-label">Your Bed</div>
+            <div class="room-stat-val"><?= $my_room['Bed_num'] ?? '—' ?></div>
+          </div>
+        </div>
+        <div class="room-stat-card">
+          <div class="room-stat-icon"><?= $type_icon ?></div>
+          <div class="room-stat-body">
+            <div class="room-stat-label">Room Type</div>
+            <div class="room-stat-val"><?= $is_ac ? 'AC' : 'Non-AC' ?></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Two-column detail section -->
+      <div class="room-detail-grid">
+
+        <!-- Room details card -->
+        <div class="info-card">
+          <h3>Room Details</h3>
+          <div class="info-row">
+            <span class="info-label">Location</span>
+            <span class="info-value">Floor <?= $my_room['floor'] ?>, Room <?= $my_room['room'] ?></span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">Room type</span>
+            <span class="info-value"><?= htmlspecialchars($type) ?></span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">Capacity</span>
+            <span class="info-value"><?= $cap ?> beds</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">Occupied</span>
+            <span class="info-value"><?= $occ ?> / <?= $cap ?></span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">Free beds</span>
+            <span class="info-value <?= $free > 0 ? 'approved' : 'rejected' ?>"><?= $free ?></span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">Room status</span>
+            <span class="info-value <?= $my_room['room_status'] === 'Available' ? 'approved' : 'rejected' ?>">
+              <?= $my_room['room_status'] ?>
+            </span>
+          </div>
+
+          <!-- Occupancy bar -->
+          <div style="margin-top:1rem;">
+            <div style="font-size:11px;color:var(--muted);margin-bottom:5px;">Occupancy — <?= $occ ?>/<?= $cap ?> (<?= $pct ?>%)</div>
+            <div class="occ-bar-track">
+              <div class="occ-bar-fill <?= $pct >= 100 ? 'full' : ($pct >= 50 ? 'mid' : 'low') ?>"
+                   style="width:<?= $pct ?>%"></div>
+            </div>
+          </div>
+
+          <!-- Bed map -->
+          <div style="margin-top:1.25rem;">
+            <div style="font-size:11px;color:var(--muted);margin-bottom:.6rem;">Bed map</div>
+            <div class="bed-map">
+              <?php for ($b = 1; $b <= $cap; $b++):
+                $is_mine = ($b == $my_room['Bed_num']);
+                // Check if bed taken by a roommate
+                $taken = false;
+                foreach ($roommates as $rm) { if ($rm['Bed_num'] == $b) { $taken = true; break; } }
+                $cls = $is_mine ? 'bed-mine' : ($taken ? 'bed-taken' : 'bed-free');
+              ?>
+                <div class="bed-cell <?= $cls ?>" title="Bed <?= $b ?><?= $is_mine ? ' (Yours)' : ($taken ? ' (Occupied)' : ' (Free)') ?>">
+                  <span class="bed-icon">🛏️</span>
+                  <span class="bed-num"><?= $b ?></span>
+                  <?php if ($is_mine): ?><span class="bed-tag">You</span><?php endif; ?>
+                </div>
+              <?php endfor; ?>
+            </div>
+            <div class="bed-legend">
+              <span class="bed-legend-item"><span class="bed-dot mine"></span>Your bed</span>
+              <span class="bed-legend-item"><span class="bed-dot taken"></span>Occupied</span>
+              <span class="bed-legend-item"><span class="bed-dot free"></span>Free</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Booking & roommates -->
+        <div style="display:flex;flex-direction:column;gap:1rem;">
+
+          <!-- Booking info card -->
+          <div class="info-card">
+            <h3>Booking Details</h3>
+            <?php if ($my_room['Booking_ID']): ?>
+              <div class="info-row">
+                <span class="info-label">Booking ID</span>
+                <span class="info-value">#<?= $my_room['Booking_ID'] ?></span>
+              </div>
+              <div class="info-row">
+                <span class="info-label">Status</span>
+                <span class="info-value approved">Allocated</span>
+              </div>
+              <?php if ($my_room['Check_in_date']): ?>
+              <div class="info-row">
+                <span class="info-label">Check-in date</span>
+                <span class="info-value"><?= date('d M Y', strtotime($my_room['Check_in_date'])) ?></span>
+              </div>
+              <?php endif; ?>
+              <div class="info-row">
+                <span class="info-label">Assigned bed</span>
+                <span class="info-value">Bed #<?= $my_room['Bed_num'] ?? '—' ?></span>
+              </div>
+            <?php else: ?>
+              <div class="info-row"><span class="info-label" style="color:var(--muted)">Booking details not linked.</span></div>
+            <?php endif; ?>
+          </div>
+
+          <!-- Roommates card -->
+          <div class="info-card">
+            <h3>Roommates <span style="font-weight:400;font-size:10px;color:var(--muted2);">(<?= count($roommates) ?> other<?= count($roommates) !== 1 ? 's' : '' ?>)</span></h3>
+            <?php if (empty($roommates)): ?>
+              <div style="font-size:13px;color:var(--muted);padding:.5rem 0;">
+                <?= $occ <= 1 ? "You're the only resident in this room so far." : "No other residents found." ?>
+              </div>
+            <?php else: ?>
+              <div style="display:flex;flex-direction:column;gap:.6rem;">
+                <?php foreach ($roommates as $i => $rm): ?>
+                  <div class="roommate-row">
+                    <div class="rm-avatar"><?= strtoupper(substr($rm['F_name'], 0, 1)) ?></div>
+                    <div class="rm-info">
+                      <div class="rm-name"><?= htmlspecialchars($rm['F_name'] . ' ' . $rm['L_name']) ?></div>
+                      <div class="rm-bed">Bed #<?= $rm['Bed_num'] ?? '?' ?></div>
+                    </div>
+                  </div>
+                <?php endforeach; ?>
+              </div>
+            <?php endif; ?>
+          </div>
+
+          <!-- Room location visual -->
+          <div class="info-card">
+            <h3>Location in Building</h3>
+            <div class="building-visual">
+              <?php for ($fl = 6; $fl >= 1; $fl--): ?>
+                <div class="bv-floor <?= $fl === intval($my_room['floor']) ? 'bv-current' : '' ?>">
+                  <div class="bv-floor-label">F<?= $fl ?></div>
+                  <div class="bv-rooms">
+                    <?php for ($rm = 1; $rm <= 20; $rm++):
+                      $is_my_room = ($fl === intval($my_room['floor']) && $rm === intval($my_room['room']));
+                    ?>
+                      <div class="bv-room <?= $is_my_room ? 'bv-mine' : '' ?>"
+                           title="<?= $is_my_room ? 'Your room' : "Floor $fl · Room $rm" ?>"></div>
+                    <?php endfor; ?>
+                  </div>
+                </div>
+              <?php endfor; ?>
+              <div style="font-size:10px;color:var(--muted);margin-top:.5rem;display:flex;gap:1rem;">
+                <span><span style="display:inline-block;width:8px;height:8px;background:var(--accent);border-radius:2px;margin-right:4px;"></span>Your room</span>
+                <span><span style="display:inline-block;width:8px;height:8px;background:var(--surface3);border:1px solid var(--border);border-radius:2px;margin-right:4px;"></span>Other rooms</span>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+    <?php endif; ?>
+
+  <?php /* ══════════════════ VISITORS ══════════════════ */ ?>
   <?php elseif ($active_tab === 'visitors'): ?>
 
     <div class="vstats">
@@ -329,5 +1119,15 @@ $active_tab = $_GET['tab'] ?? 'overview';
 
   <?php endif; ?>
 </main>
+
+<script>
+function filterFloor(floor, el) {
+  document.querySelectorAll('.floor-pill').forEach(p => p.classList.remove('active'));
+  el.classList.add('active');
+  document.querySelectorAll('.floor-section[data-floor]').forEach(sec => {
+    sec.style.display = (floor === 'all' || sec.dataset.floor == floor) ? '' : 'none';
+  });
+}
+</script>
 </body>
 </html>
