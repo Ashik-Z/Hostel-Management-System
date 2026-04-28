@@ -8,8 +8,8 @@ if (!isset($_SESSION['role']) || $_SESSION['role'] !== 'manager') {
 
 $manager_id   = $_SESSION['manager_id'];
 $manager_name = $_SESSION['name'];
-$message      = "";
-$msg_type     = "";
+$message  = htmlspecialchars($_GET['msg'] ?? "");
+$msg_type = in_array($_GET['mt'] ?? '', ['success','error']) ? $_GET['mt'] : "";
 $active_tab   = $_GET['tab'] ?? 'registrations';
 
 // ── POST actions ─────────────────────────────────────────────────
@@ -23,7 +23,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         $stmt   = mysqli_prepare($conn, "UPDATE Client SET Status=?, Approved_by=?, Approval_Date=CURDATE() WHERE ID=? AND Status='Pending'");
         mysqli_stmt_bind_param($stmt, "sii", $status, $manager_id, $cid);
         if (mysqli_stmt_execute($stmt) && mysqli_stmt_affected_rows($stmt) > 0) {
-            $message = "Client $status successfully."; $msg_type = $status==='Approved'?'success':'error';
+            header("Location: ?tab=registrations&filter=" . urlencode($_GET['filter'] ?? 'Pending') . "&msg=" . urlencode("Client $status successfully.") . "&mt=" . ($status==='Approved'?'success':'error'));
+            exit();
         } else { $message = "Could not update. Already processed."; $msg_type = "error"; }
     }
 
@@ -34,14 +35,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         $exit  = trim($_POST['exit_time']  ?? "") ?: null;
         $stmt  = mysqli_prepare($conn, "UPDATE Visitors_log SET Status='Approved', Entry_time=?, Exit_time=? WHERE Visitor_ID=? AND Status='Pending'");
         mysqli_stmt_bind_param($stmt, "ssi", $entry, $exit, $vid);
-        if (mysqli_stmt_execute($stmt) && mysqli_stmt_affected_rows($stmt) > 0) { $message = "Visitor approved."; $msg_type = "success"; }
+        if (mysqli_stmt_execute($stmt) && mysqli_stmt_affected_rows($stmt) > 0) {
+            header("Location: ?tab=visitors&vfilter=" . urlencode($_GET['vfilter'] ?? 'Pending') . "&msg=" . urlencode("Visitor approved.") . "&mt=success");
+            exit();
+        }
         else { $message = "Could not approve. Already processed."; $msg_type = "error"; }
     }
     if ($action === 'reject_visitor' && isset($_POST['visitor_id'])) {
         $vid  = intval($_POST['visitor_id']);
         $stmt = mysqli_prepare($conn, "UPDATE Visitors_log SET Status='Rejected' WHERE Visitor_ID=? AND Status='Pending'");
         mysqli_stmt_bind_param($stmt, "i", $vid);
-        if (mysqli_stmt_execute($stmt) && mysqli_stmt_affected_rows($stmt) > 0) { $message = "Visitor rejected."; $msg_type = "error"; }
+        if (mysqli_stmt_execute($stmt) && mysqli_stmt_affected_rows($stmt) > 0) {
+            header("Location: ?tab=visitors&vfilter=" . urlencode($_GET['vfilter'] ?? 'Pending') . "&msg=" . urlencode("Visitor rejected.") . "&mt=error");
+            exit();
+        }
         else { $message = "Could not reject. Already processed."; $msg_type = "error"; }
     }
 
@@ -97,8 +104,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 }
 
                 mysqli_commit($conn);
-                $message = "Room allocated successfully — Floor $floor_num, Room $room_num, Bed $bed_num.";
-                $msg_type = "success";
+                header("Location: ?tab=rooms&rtab=bookings&bfilter=" . urlencode($_GET['bfilter'] ?? 'Pending') . "&msg=" . urlencode("Room allocated successfully — Floor $floor_num, Room $room_num, Bed $bed_num.") . "&mt=success");
+                exit();
             } catch (Exception $e) {
                 mysqli_rollback($conn);
                 $message = "Allocation failed: " . $e->getMessage(); $msg_type = "error";
@@ -118,7 +125,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         } else {
             $stmt = mysqli_prepare($conn, "INSERT INTO Room (Floor_num, Room_num, Room_type, Capacity, Status) VALUES (?,?,?,?,?) ON DUPLICATE KEY UPDATE Room_type=VALUES(Room_type), Capacity=VALUES(Capacity), Status=VALUES(Status)");
             mysqli_stmt_bind_param($stmt, "iisis", $fl, $rm, $rtype, $cap, $rst);
-            if (mysqli_stmt_execute($stmt)) { $message = "Room Floor $fl / Room $rm saved."; $msg_type = "success"; }
+            if (mysqli_stmt_execute($stmt)) {
+                header("Location: ?tab=rooms&rtab=manage&msg=" . urlencode("Room Floor $fl / Room $rm saved.") . "&mt=success");
+                exit();
+            }
             else { $message = "Failed: " . mysqli_error($conn); $msg_type = "error"; }
         }
     }

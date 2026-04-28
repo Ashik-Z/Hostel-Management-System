@@ -10,8 +10,8 @@ if (!isset($_SESSION['role']) || $_SESSION['role'] !== 'client') {
 $client_id   = $_SESSION['client_id'];
 $user_id     = $_SESSION['user_id'];
 $client_name = $_SESSION['name'];
-$message     = "";
-$msg_type    = "";
+$message     = htmlspecialchars($_GET['msg'] ?? "");
+$msg_type    = in_array($_GET['mt'] ?? '', ['success','error']) ? $_GET['mt'] : "";
 
 // ── POST: request visitor ────────────────────────────────────────
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
@@ -25,17 +25,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             $message  = "Visitor name is required.";
             $msg_type = "error";
         } else {
-            $sql  = "INSERT INTO Visitors_log (Client_id, Visitor_Name, Visitor_Phone, Status, Requested_time)
-                     VALUES (?, ?, ?, 'Pending', ?)";
-            $stmt = mysqli_prepare($conn, $sql);
-            $req_time = $requested ?: null;
-            mysqli_stmt_bind_param($stmt, "isss", $client_id, $visitor_name, $visitor_phone, $req_time);
-            if (mysqli_stmt_execute($stmt)) {
-                $message  = "Visitor request submitted. Awaiting manager approval.";
-                $msg_type = "success";
-            } else {
-                $message  = "Failed to submit: " . mysqli_error($conn);
+            // Duplicate guard: same client, same visitor name, same requested time, still Pending
+            $dup_chk = mysqli_prepare($conn, "SELECT Visitor_ID FROM Visitors_log WHERE Client_id = ? AND Visitor_Name = ? AND Status = 'Pending' LIMIT 1");
+            mysqli_stmt_bind_param($dup_chk, "is", $client_id, $visitor_name);
+            mysqli_stmt_execute($dup_chk);
+            if (mysqli_fetch_assoc(mysqli_stmt_get_result($dup_chk))) {
+                $message  = "A pending visitor request for \"" . htmlspecialchars($visitor_name) . "\" already exists.";
                 $msg_type = "error";
+            } else {
+                $sql  = "INSERT INTO Visitors_log (Client_id, Visitor_Name, Visitor_Phone, Status, Requested_time)
+                         VALUES (?, ?, ?, 'Pending', ?)";
+                $stmt = mysqli_prepare($conn, $sql);
+                $req_time = $requested ?: null;
+                mysqli_stmt_bind_param($stmt, "isss", $client_id, $visitor_name, $visitor_phone, $req_time);
+                if (mysqli_stmt_execute($stmt)) {
+                    header("Location: ?tab=visitors&msg=" . urlencode("Visitor request submitted. Awaiting manager approval.") . "&mt=success");
+                    exit();
+                } else {
+                    $message  = "Failed to submit: " . mysqli_error($conn);
+                    $msg_type = "error";
+                }
             }
         }
     }
@@ -62,8 +71,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 $ins = mysqli_prepare($conn, "INSERT INTO Booking_Allocation (Room_type_requested, Booking_date, Check_in_date, Booking_status, client_id) VALUES (?, CURDATE(), ?, 'Pending', ?)");
                 mysqli_stmt_bind_param($ins, "ssi", $room_type_req, $preferred_date, $client_id);
                 if (mysqli_stmt_execute($ins)) {
-                    $message  = "Room booking request submitted successfully! A manager will allocate your room shortly.";
-                    $msg_type = "success";
+                    header("Location: ?tab=room&msg=" . urlencode("Room booking request submitted successfully! A manager will allocate your room shortly.") . "&mt=success");
+                    exit();
                 } else {
                     $message  = "Failed to submit booking: " . mysqli_error($conn);
                     $msg_type = "error";
@@ -74,6 +83,100 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
 }
 
 // ── Fetch client profile ─────────────────────────────────────────
+// ── Meal menu (single source of truth, used in POST + view) ──────
+$MEAL_MENU = [
+    'Breakfast' => [
+        'Light'  => ['items' => ['Bread', 'Jam', 'Butter'],                         'price' => 25.00],
+        'Medium' => ['items' => ['Rice', 'Curry', 'Egg'],                            'price' => 60.00],
+        'Full'   => ['items' => ['Rice', 'Meat', 'Vegetables', 'Curry', 'Egg'],      'price' => 140.00],
+    ],
+    'Lunch' => [
+        'Light'  => ['items' => ['Bread', 'Jam', 'Butter'],                         'price' => 25.00],
+        'Medium' => ['items' => ['Rice', 'Curry'],                                   'price' => 60.00],
+        'Full'   => ['items' => ['Rice', 'Meat', 'Vegetables', 'Curry', 'Salad'],    'price' => 140.00],
+    ],
+    'Snacks' => [
+        'Light'  => ['items' => ['Bread', 'Butter'],                                'price' => 25.00],
+        'Medium' => ['items' => ['Bread', 'Jam', 'Butter', 'Tea / Coffee'],          'price' => 60.00],
+        'Full'   => ['items' => ['Bread', 'Jam', 'Butter', 'Tea / Coffee', 'Egg'],   'price' => 140.00],
+    ],
+    'Dinner' => [
+        'Light'  => ['items' => ['Bread', 'Jam', 'Butter'],                         'price' => 25.00],
+        'Medium' => ['items' => ['Rice', 'Curry'],                                   'price' => 60.00],
+        'Full'   => ['items' => ['Rice', 'Meat', 'Vegetables', 'Curry'],             'price' => 140.00],
+    ],
+];
+$VALID_CATS = ['Breakfast', 'Lunch', 'Snacks', 'Dinner'];
+$VALID_SUBS = ['Light', 'Medium', 'Full'];
+
+// POST: book a meal
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'book_meal') {
+    $meal_cat  = trim($_POST['meal_category']    ?? '');
+    $meal_sub  = trim($_POST['meal_subcategory'] ?? '');
+    $meal_date = trim($_POST['meal_date']        ?? '');
+
+    if (!in_array($meal_cat, $VALID_CATS)) {
+        $message = 'Please select a valid meal category.'; $msg_type = 'error';
+    } elseif (!in_array($meal_sub, $VALID_SUBS)) {
+        $message = 'Please select a meal size.'; $msg_type = 'error';
+    } elseif (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $meal_date) || $meal_date < date('Y-m-d')) {
+        $message = 'Please pick today or a future date.'; $msg_type = 'error';
+    } else {
+        $dup = mysqli_prepare($conn, "SELECT Meal_Booking_ID FROM Meal_Booking WHERE Client_ID = ? AND Type LIKE ? AND Date = ? LIMIT 1");
+        $like = $meal_cat . ' -%';
+        mysqli_stmt_bind_param($dup, 'iss', $client_id, $like, $meal_date);
+        mysqli_stmt_execute($dup);
+        if (mysqli_fetch_assoc(mysqli_stmt_get_result($dup))) {
+            $message = "You already have a $meal_cat booked for that date."; $msg_type = 'error';
+        } else {
+            $price    = $MEAL_MENU[$meal_cat][$meal_sub]['price'];
+            $type_str = "$meal_cat - $meal_sub";
+            $ins = mysqli_prepare($conn, "INSERT INTO Meal_Booking (Type, Date, Total_cost, Client_ID) VALUES (?, ?, ?, ?)");
+            mysqli_stmt_bind_param($ins, 'ssdi', $type_str, $meal_date, $price, $client_id);
+            if (mysqli_stmt_execute($ins)) {
+                    header("Location: ?tab=my_meal&meal_cat=" . urlencode($meal_cat) . "&msg=" . urlencode("Booked: $type_str on " . date('d M Y', strtotime($meal_date)) . " — \$$price") . "&mt=success");
+                    exit();
+                } else {
+                    $message = 'DB error: ' . mysqli_error($conn); $msg_type = 'error';
+                }
+        }
+    }
+}
+
+// POST: cancel a meal
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'cancel_meal') {
+    $meal_id = intval($_POST['meal_id'] ?? 0);
+    $chk = mysqli_prepare($conn, "SELECT Date FROM Meal_Booking WHERE Meal_Booking_ID = ? AND Client_ID = ? LIMIT 1");
+    mysqli_stmt_bind_param($chk, 'ii', $meal_id, $client_id);
+    mysqli_stmt_execute($chk);
+    $mrow = mysqli_fetch_assoc(mysqli_stmt_get_result($chk));
+    if (!$mrow) {
+        $message = 'Booking not found.'; $msg_type = 'error';
+    } elseif ($mrow['Date'] < date('Y-m-d')) {
+        $message = 'Past meal bookings cannot be cancelled.'; $msg_type = 'error';
+    } else {
+        $del = mysqli_prepare($conn, "DELETE FROM Meal_Booking WHERE Meal_Booking_ID = ? AND Client_ID = ?");
+        mysqli_stmt_bind_param($del, 'ii', $meal_id, $client_id);
+        mysqli_stmt_execute($del);
+        header("Location: ?tab=my_meal&msg=" . urlencode("Meal booking cancelled.") . "&mt=success");
+        exit();
+    }
+}
+
+// Fetch all meal bookings for this client
+$mstmt = mysqli_prepare($conn, "SELECT Meal_Booking_ID, Type, Date, Total_cost FROM Meal_Booking WHERE Client_ID = ? ORDER BY Date DESC, Meal_Booking_ID DESC");
+mysqli_stmt_bind_param($mstmt, 'i', $client_id);
+mysqli_stmt_execute($mstmt);
+$meal_rows = mysqli_fetch_all(mysqli_stmt_get_result($mstmt), MYSQLI_ASSOC);
+
+// Build a [date => [bookings]] index for the week planner
+$meal_by_date = [];
+foreach ($meal_rows as $mr) { $meal_by_date[$mr['Date']][] = $mr; }
+
+// Upcoming meals count for sidebar badge
+$upcoming_meals = 0;
+foreach ($meal_rows as $mr) { if ($mr['Date'] >= date('Y-m-d')) $upcoming_meals++; }
+
 $sql  = "SELECT u.F_name, u.L_name, u.Email, u.Gender, u.D_birth,
                 u.Street, u.Area, u.Zip_code, p.Phone,
                 c.Status AS Account_Status, c.Guardian_name,
@@ -447,6 +550,98 @@ $active_tab = $_GET['tab'] ?? 'overview';
   .bv-rooms { display: flex; gap: 2px; }
   .bv-room { width: 9px; height: 12px; background: var(--surface3); border: 1px solid var(--border); border-radius: 1px; }
   .bv-room.bv-mine { background: var(--accent); border-color: var(--accent2); }
+
+  /* ── My Meal tab ── */
+  .meal-layout       { display: grid; grid-template-columns: 1fr 380px; gap: 1.5rem; align-items: start; }
+  .meal-right-col    { display: flex; flex-direction: column; gap: 1rem; }
+
+  /* Category strip */
+  .cat-strip         { display: grid; grid-template-columns: repeat(4,1fr); gap: .75rem; margin-bottom: 1.5rem; }
+  .cat-card          { background: var(--surface); border: 2px solid var(--border); border-radius: var(--radius);
+                       padding: 1.1rem .75rem; text-align: center; cursor: pointer; transition: all .2s;
+                       user-select: none; text-decoration: none; display: block; }
+  .cat-card:hover    { border-color: var(--accent); }
+  .cat-card.active   { border-color: var(--accent); background: rgba(201,169,110,.08); }
+  .cat-card .cn      { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); display: block; }
+  .cat-card.active .cn { color: var(--accent); }
+
+  /* Sub-category + items */
+  .sub-grid          { display: grid; grid-template-columns: repeat(3,1fr); gap: .75rem; margin-bottom: 1.5rem; }
+  .sub-card          { background: var(--surface); border: 2px solid var(--border); border-radius: var(--radius);
+                       padding: 1.1rem 1rem; cursor: pointer; transition: all .2s; user-select: none;
+                       text-decoration: none; display: block; }
+  .sub-card:hover    { border-color: var(--border2); }
+  .sub-card.active-light  { border-color: #6dab7e; background: rgba(109,171,126,.07); }
+  .sub-card.active-medium { border-color: #c9a96e; background: rgba(201,169,110,.07); }
+  .sub-card.active-full   { border-color: #d4655a; background: rgba(212,101,90,.07);  }
+  .sub-badge         { display: inline-block; padding: 2px 9px; border-radius: 20px; font-size: 10px; font-weight: 700;
+                       text-transform: uppercase; letter-spacing: .07em; margin-bottom: .6rem; }
+  .sb-light          { background: rgba(109,171,126,.15); color: #6dab7e; }
+  .sb-medium         { background: rgba(201,169,110,.15); color: #c9a96e; }
+  .sb-full           { background: rgba(212,101,90,.15);  color: #d4655a; }
+  .sub-price         { font-family: 'DM Serif Display', serif; font-size: 22px; line-height: 1; margin-bottom: .5rem; }
+  .sub-price span    { font-family: 'DM Sans', sans-serif; font-size: 11px; color: var(--muted); font-weight: 400; }
+  .sub-items         { list-style: none; display: flex; flex-direction: column; gap: 3px; margin-top: .5rem; }
+  .sub-items li      { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 5px; }
+  .sub-items li::before { content: ''; width: 4px; height: 4px; border-radius: 50%; background: var(--border2); flex-shrink: 0; }
+
+  /* Booking form card */
+  .meal-form-card    { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.5rem; }
+  .meal-form-card h3 { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em;
+                       color: var(--accent); margin-bottom: 1.25rem; padding-bottom: .7rem; border-bottom: 1px solid var(--border); }
+  .meal-summary-row  { display: flex; justify-content: space-between; align-items: center;
+                       font-size: 13px; padding: .45rem 0; border-bottom: 1px solid var(--border); }
+  .meal-summary-row:last-of-type { border-bottom: none; }
+  .meal-summary-row .msr-label { color: var(--muted); }
+  .meal-summary-row .msr-val   { font-weight: 600; }
+  .meal-total-row    { display: flex; justify-content: space-between; align-items: center;
+                       margin-top: 1rem; padding-top: .8rem; border-top: 1px solid var(--border2); }
+  .meal-total-label  { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); }
+  .meal-total-price  { font-family: 'DM Serif Display', serif; font-size: 26px; color: var(--accent); }
+  .meal-date-field   { margin: 1rem 0; }
+  .meal-date-field label { display: block; font-size: 11px; font-weight: 500; text-transform: uppercase;
+                           letter-spacing: .06em; color: var(--muted); margin-bottom: 6px; }
+  .meal-date-field input { width: 100%; background: var(--surface2); border: 1px solid var(--border);
+                           border-radius: var(--radius); padding: 9px 12px; color: var(--text);
+                           font-family: 'DM Sans', sans-serif; font-size: 13.5px; outline: none; transition: border-color .2s; }
+  .meal-date-field input:focus { border-color: var(--accent); }
+  .meal-submit       { width: 100%; padding: 11px; background: var(--accent); color: #0f0e0c; border: none;
+                       border-radius: var(--radius); font-family: 'DM Sans', sans-serif; font-size: 13.5px;
+                       font-weight: 600; cursor: pointer; transition: background .2s; margin-top: .25rem; }
+  .meal-submit:hover    { background: var(--accent2); }
+  .meal-submit:disabled { background: var(--surface3); color: var(--muted2); cursor: not-allowed; }
+  .meal-placeholder  { font-size: 13px; color: var(--muted); line-height: 1.6; padding: .5rem 0; }
+
+  /* History table inside right col */
+  .meal-hist-card    { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  .meal-hist-head    { padding: .85rem 1.25rem; font-size: 11px; font-weight: 600; text-transform: uppercase;
+                       letter-spacing: .08em; color: var(--accent); border-bottom: 1px solid var(--border); background: var(--surface2); }
+  .meal-hist-card table { width: 100%; border-collapse: collapse; }
+  .meal-hist-card thead th { padding: .6rem 1rem; text-align: left; font-size: 10px; font-weight: 600;
+                              letter-spacing: .07em; text-transform: uppercase; color: var(--muted);
+                              background: var(--surface2); border-bottom: 1px solid var(--border); }
+  .meal-hist-card tbody tr { border-bottom: 1px solid var(--border); }
+  .meal-hist-card tbody tr:last-child { border-bottom: none; }
+  .meal-hist-card tbody tr:hover { background: var(--surface2); }
+  .meal-hist-card td { padding: .75rem 1rem; font-size: 13px; vertical-align: middle; }
+  .cancel-btn        { padding: 3px 10px; background: var(--rejected-bg); border: 1px solid rgba(212,101,90,.3);
+                       color: var(--rejected); border-radius: 6px; font-size: 11px; font-weight: 600;
+                       cursor: pointer; font-family: 'DM Sans', sans-serif; transition: background .15s; }
+  .cancel-btn:hover  { background: rgba(212,101,90,.2); }
+
+  /* Weekly planner */
+  .week-grid         { display: grid; grid-template-columns: repeat(7,1fr); gap: .35rem; margin-top: .5rem; }
+  .week-cell         { background: var(--surface2); border: 1px solid var(--border); border-radius: 6px;
+                       padding: .5rem .3rem; text-align: center; min-height: 80px; }
+  .week-cell.today   { border-color: var(--accent); }
+  .week-day-label    { font-size: 9px; font-weight: 600; text-transform: uppercase; color: var(--muted2); margin-bottom: 3px; }
+  .week-date-num     { font-size: 12px; font-weight: 600; margin-bottom: 4px; }
+  .week-date-num.today-num { color: var(--accent); }
+  .week-meal-dot     { font-size: 9px; color: var(--muted); line-height: 1.4; word-break: break-word; }
+  .week-meal-pip     { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin: 1px; }
+  .wmp-light         { background: #6dab7e; }
+  .wmp-medium        { background: #c9a96e; }
+  .wmp-full          { background: #d4655a; }
 </style>
 </head>
 <body>
@@ -481,6 +676,11 @@ $active_tab = $_GET['tab'] ?? 'overview';
       My Room
       <?php if ($my_room): ?><span class="nbadge-green">✓</span><?php endif; ?>
     </a>
+    <a class="nav-item <?= $active_tab === 'my_meal' ? 'active' : '' ?>" href="?tab=my_meal">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M18 8h1a4 4 0 010 8h-1"/><path d="M2 8h16v9a4 4 0 01-4 4H6a4 4 0 01-4-4V8z"/><line x1="6" y1="1" x2="6" y2="4"/><line x1="10" y1="1" x2="10" y2="4"/><line x1="14" y1="1" x2="14" y2="4"/></svg>
+      My Meals
+      <?php if ($upcoming_meals > 0): ?><span class="nbadge-green"><?= $upcoming_meals ?></span><?php endif; ?>
+    </a>
     <a class="nav-item <?= $active_tab === 'visitors' ? 'active' : '' ?>" href="?tab=visitors">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>
       Visitors
@@ -511,6 +711,7 @@ $active_tab = $_GET['tab'] ?? 'overview';
     <a class="tab <?= $active_tab === 'overview' ? 'active' : '' ?>" href="?tab=overview">Overview</a>
     <a class="tab <?= $active_tab === 'room'     ? 'active' : '' ?>" href="?tab=room">Room Booking</a>
     <a class="tab <?= $active_tab === 'my_room'  ? 'active' : '' ?>" href="?tab=my_room">My Room</a>
+    <a class="tab <?= $active_tab === 'my_meal'  ? 'active' : '' ?>" href="?tab=my_meal">My Meals</a>
     <a class="tab <?= $active_tab === 'visitors' ? 'active' : '' ?>" href="?tab=visitors">Visitors</a>
   </div>
 
@@ -1050,6 +1251,207 @@ $active_tab = $_GET['tab'] ?? 'overview';
 
     <?php endif; ?>
 
+  <?php /* ================== MY MEAL ================== */ ?>
+  <?php elseif ($active_tab === 'my_meal'): ?>
+
+    <?php
+    // Category and size are carried via GET so clicking cards does a full PHP round-trip.
+    // After a successful POST booking, we fall back to GET values (or defaults).
+    $sel_cat = trim($_GET['meal_cat'] ?? ($_POST['meal_category']    ?? 'Breakfast'));
+    $sel_sub = trim($_GET['meal_sub'] ?? ($_POST['meal_subcategory'] ?? ''));
+    if (!in_array($sel_cat, $VALID_CATS)) $sel_cat = 'Breakfast';
+    if (!in_array($sel_sub, $VALID_SUBS)) $sel_sub = '';
+    ?>
+
+    <div class="meal-layout">
+
+      <!-- ── LEFT: menu selector ── -->
+      <div>
+
+        <!-- Category strip: each card is a plain link -->
+        <div class="cat-strip">
+          <?php foreach ($MEAL_MENU as $cat => $data): ?>
+            <a class="cat-card <?= $cat === $sel_cat ? 'active' : '' ?>"
+               href="?tab=my_meal&meal_cat=<?= urlencode($cat) ?>">
+              <span class="cn"><?= htmlspecialchars($cat) ?></span>
+            </a>
+          <?php endforeach; ?>
+        </div>
+
+        <!-- Sub-category cards for the selected category only -->
+        <?php if (isset($MEAL_MENU[$sel_cat])): ?>
+          <div class="sub-grid">
+            <?php foreach ($VALID_SUBS as $sub):
+              $entry  = $MEAL_MENU[$sel_cat][$sub];
+              $sub_lc = strtolower($sub);
+              $active_cls = ($sub === $sel_sub) ? "active-$sub_lc" : '';
+            ?>
+              <a class="sub-card <?= $active_cls ?>"
+                 href="?tab=my_meal&meal_cat=<?= urlencode($sel_cat) ?>&meal_sub=<?= urlencode($sub) ?>">
+                <div class="sub-badge sb-<?= $sub_lc ?>"><?= $sub ?></div>
+                <div class="sub-price">$<?= number_format($entry['price'], 0) ?> <span>/ meal</span></div>
+                <ul class="sub-items">
+                  <?php foreach ($entry['items'] as $item): ?>
+                    <li><?= htmlspecialchars($item) ?></li>
+                  <?php endforeach; ?>
+                </ul>
+              </a>
+            <?php endforeach; ?>
+          </div>
+        <?php endif; ?>
+
+        <!-- Weekly planner -->
+        <div class="info-card" style="margin-top:1.5rem;">
+          <h3 style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--accent);margin-bottom:1rem;padding-bottom:.7rem;border-bottom:1px solid var(--border);">
+            This Week's Meals
+          </h3>
+          <div class="week-grid">
+            <?php
+            for ($d = 0; $d < 7; $d++):
+              $ts      = strtotime("+$d days");
+              $dkey    = date('Y-m-d', $ts);
+              $dlabel  = date('D', $ts);
+              $dnum    = date('j', $ts);
+              $is_today = ($dkey === date('Y-m-d'));
+              $day_meals = $meal_by_date[$dkey] ?? [];
+            ?>
+              <div class="week-cell <?= $is_today ? 'today' : '' ?>">
+                <div class="week-day-label"><?= $dlabel ?></div>
+                <div class="week-date-num <?= $is_today ? 'today-num' : '' ?>"><?= $dnum ?></div>
+                <?php if (empty($day_meals)): ?>
+                  <div class="week-meal-dot" style="color:var(--border2);">—</div>
+                <?php else: ?>
+                  <?php foreach ($day_meals as $dm):
+                    [$dmcat, $dmsub] = array_pad(explode(' - ', $dm['Type']), 2, '');
+                    $pip_cls = 'wmp-' . strtolower($dmsub ?: 'light');
+                  ?>
+                    <div title="<?= htmlspecialchars($dm['Type']) ?> — $<?= $dm['Total_cost'] ?>">
+                      <span class="week-meal-pip <?= $pip_cls ?>"></span>
+                      <span class="week-meal-dot"><?= htmlspecialchars($dmcat) ?></span>
+                    </div>
+                  <?php endforeach; ?>
+                <?php endif; ?>
+              </div>
+            <?php endfor; ?>
+          </div>
+          <div style="display:flex;gap:1rem;margin-top:.75rem;flex-wrap:wrap;">
+            <span style="font-size:11px;color:var(--muted);display:flex;align-items:center;gap:4px;"><span class="week-meal-pip wmp-light"></span>Light</span>
+            <span style="font-size:11px;color:var(--muted);display:flex;align-items:center;gap:4px;"><span class="week-meal-pip wmp-medium"></span>Medium</span>
+            <span style="font-size:11px;color:var(--muted);display:flex;align-items:center;gap:4px;"><span class="week-meal-pip wmp-full"></span>Full</span>
+          </div>
+        </div>
+
+      </div><!-- end left col -->
+
+      <!-- ── RIGHT: booking form + history ── -->
+      <div class="meal-right-col">
+
+        <!-- Booking form -->
+        <div class="meal-form-card">
+          <h3>Order Summary</h3>
+
+          <div class="meal-placeholder"
+               style="<?= $sel_sub ? 'display:none;' : '' ?>">
+            Select a category above, then choose a size to build your order.
+          </div>
+
+          <div style="<?= !$sel_sub ? 'display:none;' : '' ?>">
+            <div class="meal-summary-row">
+              <span class="msr-label">Category</span>
+              <span class="msr-val"><?= htmlspecialchars($sel_cat) ?></span>
+            </div>
+            <div class="meal-summary-row">
+              <span class="msr-label">Size</span>
+              <span class="msr-val"><?= htmlspecialchars($sel_sub) ?></span>
+            </div>
+            <div class="meal-summary-row">
+              <span class="msr-label">Includes</span>
+              <span class="msr-val" style="text-align:right;font-size:12px;">
+                <?php if ($sel_sub && isset($MEAL_MENU[$sel_cat][$sel_sub])): ?>
+                  <?= implode(', ', $MEAL_MENU[$sel_cat][$sel_sub]['items']) ?>
+                <?php endif; ?>
+              </span>
+            </div>
+            <div class="meal-total-row">
+              <span class="meal-total-label">Total</span>
+              <span class="meal-total-price">
+                $<?= ($sel_sub && isset($MEAL_MENU[$sel_cat][$sel_sub])) ? number_format($MEAL_MENU[$sel_cat][$sel_sub]['price'], 0) : '0' ?>
+              </span>
+            </div>
+          </div>
+
+          <form method="POST" action="?tab=my_meal&meal_cat=<?= urlencode($sel_cat) ?>&meal_sub=<?= urlencode($sel_sub) ?>">
+            <input type="hidden" name="action" value="book_meal">
+            <input type="hidden" name="meal_category"    value="<?= htmlspecialchars($sel_cat) ?>">
+            <input type="hidden" name="meal_subcategory" value="<?= htmlspecialchars($sel_sub) ?>">
+
+            <div class="meal-date-field">
+              <label>Date</label>
+              <input type="date" name="meal_date"
+                     value="<?= date('Y-m-d') ?>"
+                     min="<?= date('Y-m-d') ?>" required>
+            </div>
+
+            <button type="submit" class="meal-submit"
+                    <?= !$sel_sub ? 'disabled' : '' ?>>
+              <?= $sel_sub ? "Confirm Booking" : "Select a size above" ?>
+            </button>
+          </form>
+        </div>
+
+        <!-- Booking history -->
+        <div class="meal-hist-card">
+          <div class="meal-hist-head">Booking History</div>
+          <?php if (empty($meal_rows)): ?>
+            <div class="empty-state">No meal bookings yet.</div>
+          <?php else: ?>
+            <table>
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Meal</th>
+                  <th>Cost</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                <?php foreach ($meal_rows as $mr):
+                  [$mcat, $msub] = array_pad(explode(' - ', $mr['Type']), 2, '');
+                  $msub_lc  = strtolower($msub ?: 'light');
+                  $is_past  = $mr['Date'] < date('Y-m-d');
+                ?>
+                  <tr>
+                    <td>
+                      <div style="font-weight:600;font-size:12px;"><?= date('d M', strtotime($mr['Date'])) ?></div>
+                      <div class="cell-muted" style="font-size:11px;"><?= date('Y', strtotime($mr['Date'])) ?></div>
+                    </td>
+                    <td>
+                      <span class="sub-badge sb-<?= $msub_lc ?>" style="margin-bottom:0;"><?= htmlspecialchars($msub) ?></span>
+                      <div style="font-size:12px;color:var(--muted);margin-top:3px;"><?= htmlspecialchars($mcat) ?></div>
+                    </td>
+                    <td style="font-weight:600;color:var(--accent);">$<?= number_format($mr['Total_cost'], 0) ?></td>
+                    <td>
+                      <?php if (!$is_past): ?>
+                        <form method="POST" action="?tab=my_meal" style="margin:0;"
+                              onsubmit="return confirm('Cancel this meal booking?')">
+                          <input type="hidden" name="action"  value="cancel_meal">
+                          <input type="hidden" name="meal_id" value="<?= $mr['Meal_Booking_ID'] ?>">
+                          <button type="submit" class="cancel-btn">Cancel</button>
+                        </form>
+                      <?php else: ?>
+                        <span style="font-size:11px;color:var(--muted2);">Past</span>
+                      <?php endif; ?>
+                    </td>
+                  </tr>
+                <?php endforeach; ?>
+              </tbody>
+            </table>
+          <?php endif; ?>
+        </div>
+
+      </div><!-- end right col -->
+    </div><!-- end meal-layout -->
+
   <?php /* ══════════════════ VISITORS ══════════════════ */ ?>
   <?php elseif ($active_tab === 'visitors'): ?>
 
@@ -1121,10 +1523,11 @@ $active_tab = $_GET['tab'] ?? 'overview';
 </main>
 
 <script>
+/* ── Room Booking: floor filter ─────────────────────────────────── */
 function filterFloor(floor, el) {
-  document.querySelectorAll('.floor-pill').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.floor-pill').forEach(function(p) { p.classList.remove('active'); });
   el.classList.add('active');
-  document.querySelectorAll('.floor-section[data-floor]').forEach(sec => {
+  document.querySelectorAll('.floor-section[data-floor]').forEach(function(sec) {
     sec.style.display = (floor === 'all' || sec.dataset.floor == floor) ? '' : 'none';
   });
 }
