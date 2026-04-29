@@ -150,6 +150,8 @@ $s = [
     'rna_avail' => qcount($conn,"SELECT COUNT(*) AS c FROM Room WHERE Room_type='Non-AC' AND Status='Available'"),
     'rac_total' => qcount($conn,"SELECT COUNT(*) AS c FROM Room WHERE Room_type='AC'"),
     'rna_total' => qcount($conn,"SELECT COUNT(*) AS c FROM Room WHERE Room_type='Non-AC'"),
+    'acc_unpaid' => qcount($conn,"SELECT COUNT(*) AS c FROM (SELECT c.ID FROM Client c LEFT JOIN Accountings a ON a.Client_ID=c.ID LEFT JOIN Payment_Record pr ON pr.Client_ID=c.ID WHERE c.Status='Approved' GROUP BY c.ID HAVING COALESCE(SUM(a.Price),0)-COALESCE(SUM(pr.Payment_Amount),0)>0) x"),
+    'acc_paid'   => qcount($conn,"SELECT COUNT(*) AS c FROM (SELECT c.ID FROM Client c LEFT JOIN Accountings a ON a.Client_ID=c.ID LEFT JOIN Payment_Record pr ON pr.Client_ID=c.ID WHERE c.Status='Approved' GROUP BY c.ID HAVING COALESCE(SUM(a.Price),0)-COALESCE(SUM(pr.Payment_Amount),0)<=0) x"),
 ];
 
 // ── Fetch clients ────────────────────────────────────────────────
@@ -189,6 +191,44 @@ $bookings=[]; while($row=mysqli_fetch_assoc($br)) $bookings[]=$row;
 $room_grid = [];
 $rg = mysqli_query($conn,"SELECT r.Floor_num,r.Room_num,r.Room_type,r.Capacity,r.Status,(SELECT COUNT(*) FROM Stays_IN si WHERE si.Floor_NUM=r.Floor_num AND si.Room_NUm=r.Room_num) AS occupants FROM Room r ORDER BY r.Floor_num,r.Room_num");
 while ($row=mysqli_fetch_assoc($rg)) $room_grid[$row['Floor_num']][$row['Room_num']] = $row;
+
+// ── Fetch accounting overview (one row per approved client) ──────
+$acc_filter = $_GET['afilter'] ?? 'All';
+if (!in_array($acc_filter, ['All','Unpaid','Paid'])) $acc_filter = 'All';
+
+$acc_sql = "
+    SELECT
+        c.ID                                        AS Client_ID,
+        u.F_name, u.L_name, u.Email,
+        COALESCE(SUM(a.Price), 0)                   AS total_charges,
+        COALESCE(pr.total_paid, 0)                  AS total_paid,
+        COALESCE(SUM(a.Price), 0)
+            - COALESCE(pr.total_paid, 0)            AS outstanding,
+        COUNT(CASE WHEN a.Entry_Type='Room' THEN 1 END) AS room_entries,
+        COUNT(CASE WHEN a.Entry_Type='Meal' THEN 1 END) AS meal_entries,
+        pr.last_payment                             AS last_payment_date
+    FROM Client c
+    INNER JOIN `User` u ON u.ID = c.Student_ID
+    LEFT JOIN Accountings a ON a.Client_ID = c.ID
+    LEFT JOIN (
+        SELECT Client_ID,
+               SUM(Payment_Amount) AS total_paid,
+               MAX(Payment_Date)   AS last_payment
+        FROM Payment_Record
+        GROUP BY Client_ID
+    ) pr ON pr.Client_ID = c.ID
+    WHERE c.Status = 'Approved'
+    GROUP BY c.ID, u.F_name, u.L_name, u.Email, pr.total_paid, pr.last_payment
+    HAVING " . ($acc_filter === 'Unpaid' ? "outstanding > 0" : ($acc_filter === 'Paid' ? "outstanding <= 0" : "1=1")) . "
+    ORDER BY outstanding DESC, c.ID ASC";
+
+$acc_rows = [];
+$acc_res = mysqli_query($conn, $acc_sql);
+while ($row = mysqli_fetch_assoc($acc_res)) $acc_rows[] = $row;
+
+$acc_total_charges    = array_sum(array_column($acc_rows, 'total_charges'));
+$acc_total_paid       = array_sum(array_column($acc_rows, 'total_paid'));
+$acc_total_outstanding = array_sum(array_column($acc_rows, 'outstanding'));
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -315,6 +355,14 @@ while ($row=mysqli_fetch_assoc($rg)) $room_grid[$row['Floor_num']][$row['Room_nu
   .edit-field select option{background:var(--surface2)}
   .save-btn{padding:9px 22px;background:var(--accent);color:#0f0e0c;border:none;border-radius:var(--radius);font-family:'DM Sans',sans-serif;font-size:13px;font-weight:600;cursor:pointer;transition:background .2s}
   .save-btn:hover{background:var(--accent2)}
+  /* Accounting tab */
+  .acc-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;margin-bottom:2rem}
+  .badge-paid{background:var(--approved-bg);color:var(--approved)}
+  .badge-unpaid{background:var(--rejected-bg);color:var(--rejected)}
+  .badge-settled{background:var(--approved-bg);color:var(--approved)}
+  .facc-unpaid{background:var(--rejected-bg);border-color:var(--rejected);color:var(--rejected)}
+  .facc-paid{background:var(--approved-bg);border-color:var(--approved);color:var(--approved)}
+  .facc-all{background:var(--surface2);border-color:var(--border2);color:var(--text)}
 </style>
 </head>
 <body>
@@ -337,6 +385,10 @@ while ($row=mysqli_fetch_assoc($rg)) $room_grid[$row['Floor_num']][$row['Room_nu
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/></svg>Visitor Requests
       <?php if($s['vpending']>0):?><span class="nbadge"><?=$s['vpending']?></span><?php endif;?>
     </a>
+    <a class="nav-item <?=$active_tab==='accounting'?'active':''?>" href="?tab=accounting">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="3" width="20" height="18" rx="2"/><path d="M8 7h8M8 11h8M8 15h5"/></svg>Accounting
+      <?php if($s['acc_unpaid']>0):?><span class="nbadge"><?=$s['acc_unpaid']?></span><?php endif;?>
+    </a>
   </nav>
   <div class="sidebar-footer">
     <div class="user-chip">
@@ -350,12 +402,14 @@ while ($row=mysqli_fetch_assoc($rg)) $room_grid[$row['Floor_num']][$row['Room_nu
 <main class="main">
   <div class="page-title">
     <?php if($active_tab==='registrations') echo 'Client Registrations';
-    elseif($active_tab==='rooms') echo 'Room Management';
+    elseif($active_tab==='rooms')       echo 'Room Management';
+    elseif($active_tab==='accounting')  echo 'Accounting';
     else echo 'Visitor Requests'; ?>
   </div>
   <div class="page-sub">
     <?php if($active_tab==='registrations') echo 'Approve or reject client account applications';
-    elseif($active_tab==='rooms') echo 'View room availability, allocate rooms to clients, and manage room settings';
+    elseif($active_tab==='rooms')       echo 'View room availability, allocate rooms to clients, and manage room settings';
+    elseif($active_tab==='accounting')  echo 'Overview of all client charges, payments, and outstanding balances';
     else echo 'Approve or reject visitor requests from clients'; ?>
   </div>
   <?php if($message):?><div class="toast <?=$msg_type?>"><?=htmlspecialchars($message)?></div><?php endif;?>
@@ -363,6 +417,7 @@ while ($row=mysqli_fetch_assoc($rg)) $room_grid[$row['Floor_num']][$row['Room_nu
     <a class="tab <?=$active_tab==='registrations'?'active':''?>" href="?tab=registrations">Registrations</a>
     <a class="tab <?=$active_tab==='rooms'?'active':''?>"         href="?tab=rooms">Rooms</a>
     <a class="tab <?=$active_tab==='visitors'?'active':''?>"      href="?tab=visitors">Visitor Requests</a>
+    <a class="tab <?=$active_tab==='accounting'?'active':''?>"    href="?tab=accounting">Accounting</a>
   </div>
 
   <!-- ══ REGISTRATIONS ══ -->
@@ -652,6 +707,101 @@ while ($row=mysqli_fetch_assoc($rg)) $room_grid[$row['Floor_num']][$row['Room_nu
         </table>
       <?php endif;?>
     </div>
+  <!-- ══ ACCOUNTING ══ -->
+  <?php elseif($active_tab==='accounting'):?>
+
+    <!-- Stats row -->
+    <div class="acc-stats">
+      <div class="stat-card">
+        <div class="stat-label">Approved Clients</div>
+        <div class="stat-val"><?=$s['capproved']?></div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Total Charged</div>
+        <div class="stat-val" style="font-size:24px;">$<?=number_format($acc_total_charges,2)?></div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Total Collected</div>
+        <div class="stat-val a" style="font-size:24px;">$<?=number_format($acc_total_paid,2)?></div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Total Outstanding</div>
+        <div class="stat-val r" style="font-size:24px;">$<?=number_format(max(0,$acc_total_outstanding),2)?></div>
+      </div>
+    </div>
+
+    <!-- Filter bar -->
+    <div class="filter-bar">
+      <a class="ftab <?=$acc_filter==='All'   ?'facc-all':''?>"    href="?tab=accounting&afilter=All">All Clients</a>
+      <a class="ftab <?=$acc_filter==='Unpaid'?'facc-unpaid':''?>" href="?tab=accounting&afilter=Unpaid">
+        Unpaid<?=$s['acc_unpaid']>0?' ('.$s['acc_unpaid'].')':''?>
+      </a>
+      <a class="ftab <?=$acc_filter==='Paid'  ?'facc-paid':''?>"   href="?tab=accounting&afilter=Paid">
+        Settled<?=$s['acc_paid']>0?' ('.$s['acc_paid'].')':''?>
+      </a>
+    </div>
+
+    <!-- Accounts table -->
+    <div class="table-wrap">
+      <?php if(empty($acc_rows)):?>
+        <div class="empty-state">No <?=strtolower($acc_filter)==='all'?'approved':strtolower($acc_filter)?> client accounts found.</div>
+      <?php else:?>
+        <table>
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Client</th>
+              <th>Charges</th>
+              <th>Room</th>
+              <th>Meals</th>
+              <th>Paid</th>
+              <th>Outstanding</th>
+              <th>Last Payment</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            <?php foreach($acc_rows as $a):
+              $is_settled = $a['outstanding'] <= 0;
+            ?>
+            <tr>
+              <td class="cell-muted"><?=$a['Client_ID']?></td>
+              <td>
+                <div class="fw500"><?=htmlspecialchars($a['F_name'].' '.$a['L_name'])?></div>
+                <div class="cell-muted"><?=htmlspecialchars($a['Email'])?></div>
+              </td>
+              <td class="fw500">$<?=number_format($a['total_charges'],2)?></td>
+              <td class="cell-muted">
+                <?=$a['room_entries']?> entr<?=$a['room_entries']===1?'y':'ies'?>
+              </td>
+              <td class="cell-muted">
+                <?=$a['meal_entries']?> meal<?=$a['meal_entries']===1?'':'s'?>
+              </td>
+              <td style="color:var(--approved);font-weight:500;">
+                $<?=number_format($a['total_paid'],2)?>
+              </td>
+              <td>
+                <?php if($is_settled):?>
+                  <span style="color:var(--approved);font-weight:500;">$0.00</span>
+                <?php else:?>
+                  <span style="color:var(--rejected);font-weight:600;">$<?=number_format($a['outstanding'],2)?></span>
+                <?php endif;?>
+              </td>
+              <td class="cell-muted">
+                <?=$a['last_payment_date']?date('d M Y',strtotime($a['last_payment_date'])):'—'?>
+              </td>
+              <td>
+                <span class="badge <?=$is_settled?'badge-paid':'badge-unpaid'?>">
+                  <?=$is_settled?'Settled':'Unpaid'?>
+                </span>
+              </td>
+            </tr>
+            <?php endforeach;?>
+          </tbody>
+        </table>
+      <?php endif;?>
+    </div>
+
   <?php endif;?>
 </main>
 </body>
