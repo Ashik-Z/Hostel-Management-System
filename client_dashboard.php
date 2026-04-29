@@ -53,12 +53,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     elseif ($_POST['action'] === 'book_room') {
         $room_type_req  = trim($_POST['room_type_requested'] ?? "");
         $preferred_date = trim($_POST['preferred_checkin'] ?? "") ?: date('Y-m-d');
+        $duration       = intval($_POST['duration_months'] ?? 0);
+
+        $ROOM_PACKAGES  = ['AC' => ['name' => 'Spacious', 'rate' => 400], 'Non-AC' => ['name' => 'Regular', 'rate' => 250]];
 
         if (!in_array($room_type_req, ['AC', 'Non-AC'])) {
             $message  = "Please select a valid room type.";
             $msg_type = "error";
+        } elseif ($duration < 1 || $duration > 24) {
+            $message  = "Duration must be between 1 and 24 months.";
+            $msg_type = "error";
         } else {
-            // Check if client already has a pending or allocated booking
             $chk = mysqli_prepare($conn, "SELECT Booking_ID, Booking_status FROM Booking_Allocation WHERE client_id = ? AND Booking_status IN ('Pending','Allocated') LIMIT 1");
             mysqli_stmt_bind_param($chk, "i", $client_id);
             mysqli_stmt_execute($chk);
@@ -68,13 +73,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 $message  = "You already have a " . strtolower($existing['Booking_status']) . " booking request (Booking #" . $existing['Booking_ID'] . "). Please wait for it to be processed.";
                 $msg_type = "error";
             } else {
-                $ins = mysqli_prepare($conn, "INSERT INTO Booking_Allocation (Room_type_requested, Booking_date, Check_in_date, Booking_status, client_id) VALUES (?, CURDATE(), ?, 'Pending', ?)");
-                mysqli_stmt_bind_param($ins, "ssi", $room_type_req, $preferred_date, $client_id);
-                if (mysqli_stmt_execute($ins)) {
-                    header("Location: ?tab=room&msg=" . urlencode("Room booking request submitted successfully! A manager will allocate your room shortly.") . "&mt=success");
+                mysqli_begin_transaction($conn);
+                try {
+                    // Insert booking
+                    $ins = mysqli_prepare($conn, "INSERT INTO Booking_Allocation (Room_type_requested, Booking_date, Check_in_date, Booking_status, client_id) VALUES (?, CURDATE(), ?, 'Pending', ?)");
+                    mysqli_stmt_bind_param($ins, "ssi", $room_type_req, $preferred_date, $client_id);
+                    if (!mysqli_stmt_execute($ins)) throw new Exception(mysqli_error($conn));
+
+                    // Insert accounting entry
+                    $pkg      = $ROOM_PACKAGES[$room_type_req];
+                    $price    = $pkg['rate'] * $duration;
+                    $pkg_name = $pkg['name'];
+                    $acc = mysqli_prepare($conn, "INSERT INTO Accountings (Package_Name, Room_Type, Duration, Price, Client_ID, Entry_Type, Entry_Date, Manager_ID) VALUES (?, ?, ?, ?, ?, 'Room', CURDATE(), NULL)");
+                    mysqli_stmt_bind_param($acc, "ssdii", $pkg_name, $room_type_req, $duration, $price, $client_id);
+                    if (!mysqli_stmt_execute($acc)) throw new Exception(mysqli_error($conn));
+
+                    mysqli_commit($conn);
+                    header("Location: ?tab=room&msg=" . urlencode("Room booking submitted! {$pkg_name} package — {$duration} month(s) at \${$price} added to your account.") . "&mt=success");
                     exit();
-                } else {
-                    $message  = "Failed to submit booking: " . mysqli_error($conn);
+                } catch (Exception $e) {
+                    mysqli_rollback($conn);
+                    $message  = "Failed to submit booking: " . $e->getMessage();
                     $msg_type = "error";
                 }
             }
@@ -131,14 +150,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         } else {
             $price    = $MEAL_MENU[$meal_cat][$meal_sub]['price'];
             $type_str = "$meal_cat - $meal_sub";
-            $ins = mysqli_prepare($conn, "INSERT INTO Meal_Booking (Type, Date, Total_cost, Client_ID) VALUES (?, ?, ?, ?)");
-            mysqli_stmt_bind_param($ins, 'ssdi', $type_str, $meal_date, $price, $client_id);
-            if (mysqli_stmt_execute($ins)) {
-                    header("Location: ?tab=my_meal&meal_cat=" . urlencode($meal_cat) . "&msg=" . urlencode("Booked: $type_str on " . date('d M Y', strtotime($meal_date)) . " — \$$price") . "&mt=success");
-                    exit();
-                } else {
-                    $message = 'DB error: ' . mysqli_error($conn); $msg_type = 'error';
-                }
+            mysqli_begin_transaction($conn);
+            try {
+                $ins = mysqli_prepare($conn, "INSERT INTO Meal_Booking (Type, Date, Total_cost, Client_ID) VALUES (?, ?, ?, ?)");
+                mysqli_stmt_bind_param($ins, 'ssdi', $type_str, $meal_date, $price, $client_id);
+                if (!mysqli_stmt_execute($ins)) throw new Exception(mysqli_error($conn));
+
+                // Accounting entry for meal
+                $acc = mysqli_prepare($conn, "INSERT INTO Accountings (Package_Name, Room_Type, Duration, Price, Client_ID, Entry_Type, Entry_Date, Manager_ID) VALUES (?, NULL, 1, ?, ?, 'Meal', ?, NULL)");
+                mysqli_stmt_bind_param($acc, 'sdis', $type_str, $price, $client_id, $meal_date);
+                if (!mysqli_stmt_execute($acc)) throw new Exception(mysqli_error($conn));
+
+                mysqli_commit($conn);
+                header("Location: ?tab=my_meal&meal_cat=" . urlencode($meal_cat) . "&msg=" . urlencode("Booked: $type_str on " . date('d M Y', strtotime($meal_date)) . " — \$$price") . "&mt=success");
+                exit();
+            } catch (Exception $e) {
+                mysqli_rollback($conn);
+                $message = 'DB error: ' . $e->getMessage(); $msg_type = 'error';
+            }
         }
     }
 }
@@ -155,9 +184,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     } elseif ($mrow['Date'] < date('Y-m-d')) {
         $message = 'Past meal bookings cannot be cancelled.'; $msg_type = 'error';
     } else {
+        mysqli_begin_transaction($conn);
+        // Fetch the meal type before deleting for accounting cleanup
+        $mtype_res = mysqli_prepare($conn, "SELECT Type, Date FROM Meal_Booking WHERE Meal_Booking_ID = ? AND Client_ID = ? LIMIT 1");
+        mysqli_stmt_bind_param($mtype_res, 'ii', $meal_id, $client_id);
+        mysqli_stmt_execute($mtype_res);
+        $mtype_row = mysqli_fetch_assoc(mysqli_stmt_get_result($mtype_res));
+
         $del = mysqli_prepare($conn, "DELETE FROM Meal_Booking WHERE Meal_Booking_ID = ? AND Client_ID = ?");
         mysqli_stmt_bind_param($del, 'ii', $meal_id, $client_id);
         mysqli_stmt_execute($del);
+
+        // Remove matching accounting entry (same package name, date, client)
+        if ($mtype_row) {
+            $dacc = mysqli_prepare($conn, "DELETE FROM Accountings WHERE Client_ID = ? AND Package_Name = ? AND Entry_Date = ? AND Entry_Type = 'Meal' LIMIT 1");
+            mysqli_stmt_bind_param($dacc, 'iss', $client_id, $mtype_row['Type'], $mtype_row['Date']);
+            mysqli_stmt_execute($dacc);
+        }
+        mysqli_commit($conn);
         header("Location: ?tab=my_meal&msg=" . urlencode("Meal booking cancelled.") . "&mt=success");
         exit();
     }
@@ -294,6 +338,61 @@ if ($my_room) {
     $rm_res = mysqli_stmt_get_result($rm_stmt);
     while ($row = mysqli_fetch_assoc($rm_res)) $roommates[] = $row;
 }
+
+// ── POST: make payment ───────────────────────────────────────────
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'make_payment') {
+    $pay_method   = trim($_POST['payment_method'] ?? '');
+    $valid_methods = ['Cash', 'Card', 'bKash'];
+    if (!in_array($pay_method, $valid_methods)) {
+        $message = "Please select a valid payment method."; $msg_type = "error";
+    } else {
+        // Calculate outstanding balance
+        $tot_stmt = mysqli_prepare($conn, "SELECT COALESCE(SUM(Price),0) AS total FROM Accountings WHERE Client_ID = ?");
+        mysqli_stmt_bind_param($tot_stmt, 'i', $client_id);
+        mysqli_stmt_execute($tot_stmt);
+        $total_charges = (float) mysqli_fetch_assoc(mysqli_stmt_get_result($tot_stmt))['total'];
+
+        $paid_stmt = mysqli_prepare($conn, "SELECT COALESCE(SUM(Payment_Amount),0) AS paid FROM Payment_Record WHERE Client_ID = ?");
+        mysqli_stmt_bind_param($paid_stmt, 'i', $client_id);
+        mysqli_stmt_execute($paid_stmt);
+        $total_paid = (float) mysqli_fetch_assoc(mysqli_stmt_get_result($paid_stmt))['paid'];
+
+        $outstanding = $total_charges - $total_paid;
+        if ($outstanding <= 0) {
+            $message = "No outstanding balance to pay."; $msg_type = "error";
+        } else {
+            $pins = mysqli_prepare($conn, "INSERT INTO Payment_Record (Payment_Amount, Payment_Method, Payment_Date, Student_ID, Client_ID) VALUES (?, ?, CURDATE(), ?, ?)");
+            mysqli_stmt_bind_param($pins, 'dsii', $outstanding, $pay_method, $user_id, $client_id);
+            if (mysqli_stmt_execute($pins)) {
+                $tx_id = mysqli_insert_id($conn);
+                header("Location: ?tab=payment&msg=" . urlencode("Payment of \$$outstanding received via $pay_method. Receipt #$tx_id.") . "&mt=success");
+                exit();
+            } else {
+                $message = "Payment failed: " . mysqli_error($conn); $msg_type = "error";
+            }
+        }
+    }
+}
+
+// ── Fetch accounting ledger ──────────────────────────────────────
+$acc_stmt = mysqli_prepare($conn, "SELECT Package_ID, Package_Name, Room_Type, Duration, Price, Entry_Type, Entry_Date FROM Accountings WHERE Client_ID = ? ORDER BY Entry_Date ASC, Package_ID ASC");
+mysqli_stmt_bind_param($acc_stmt, 'i', $client_id);
+mysqli_stmt_execute($acc_stmt);
+$acc_rows = mysqli_fetch_all(mysqli_stmt_get_result($acc_stmt), MYSQLI_ASSOC);
+
+$acc_room_rows  = array_filter($acc_rows, fn($r) => $r['Entry_Type'] === 'Room');
+$acc_meal_rows  = array_filter($acc_rows, fn($r) => $r['Entry_Type'] === 'Meal');
+$total_charges  = array_sum(array_column($acc_rows, 'Price'));
+
+// ── Fetch payment history ────────────────────────────────────────
+$pay_stmt = mysqli_prepare($conn, "SELECT TX_ID, Payment_Amount, Payment_Method, Payment_Date FROM Payment_Record WHERE Client_ID = ? ORDER BY Payment_Date DESC, TX_ID DESC");
+mysqli_stmt_bind_param($pay_stmt, 'i', $client_id);
+mysqli_stmt_execute($pay_stmt);
+$pay_rows   = mysqli_fetch_all(mysqli_stmt_get_result($pay_stmt), MYSQLI_ASSOC);
+$total_paid = array_sum(array_column($pay_rows, 'Payment_Amount'));
+$outstanding = $total_charges - $total_paid;
+$room_total  = array_sum(array_column(array_values($acc_room_rows), 'Price'));
+$meal_total  = array_sum(array_column(array_values($acc_meal_rows), 'Price'));
 
 $active_tab = $_GET['tab'] ?? 'overview';
 ?>
@@ -642,6 +741,81 @@ $active_tab = $_GET['tab'] ?? 'overview';
   .wmp-light         { background: #6dab7e; }
   .wmp-medium        { background: #c9a96e; }
   .wmp-full          { background: #d4655a; }
+
+  /* ── Accounting tab ── */
+  .acc-layout        { display: grid; grid-template-columns: 1fr 320px; gap: 1.5rem; align-items: start; }
+  .acc-card          { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; margin-bottom: 1rem; }
+  .acc-card-head     { padding: .85rem 1.25rem; font-size: 11px; font-weight: 600; text-transform: uppercase;
+                       letter-spacing: .08em; color: var(--accent); border-bottom: 1px solid var(--border); background: var(--surface2);
+                       display: flex; justify-content: space-between; align-items: center; }
+  .acc-card table    { width: 100%; border-collapse: collapse; }
+  .acc-card thead th { padding: .6rem 1.25rem; text-align: left; font-size: 10px; font-weight: 600;
+                       letter-spacing: .07em; text-transform: uppercase; color: var(--muted);
+                       background: var(--surface2); border-bottom: 1px solid var(--border); }
+  .acc-card tbody tr { border-bottom: 1px solid var(--border); }
+  .acc-card tbody tr:last-child { border-bottom: none; }
+  .acc-card tbody tr:hover { background: var(--surface2); }
+  .acc-card td       { padding: .8rem 1.25rem; font-size: 13.5px; vertical-align: middle; }
+
+  /* Summary panel */
+  .acc-summary       { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.5rem; position: sticky; top: 1.5rem; }
+  .acc-summary h3    { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em;
+                       color: var(--accent); margin-bottom: 1.25rem; padding-bottom: .75rem; border-bottom: 1px solid var(--border); }
+  .acc-sum-row       { display: flex; justify-content: space-between; font-size: 13px; padding: .45rem 0; border-bottom: 1px solid var(--border); }
+  .acc-sum-row:last-of-type { border-bottom: none; }
+  .acc-sum-label     { color: var(--muted); }
+  .acc-total-row     { display: flex; justify-content: space-between; align-items: center;
+                       margin-top: 1rem; padding-top: .8rem; border-top: 2px solid var(--border2); }
+  .acc-total-label   { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); }
+  .acc-total-val     { font-family: 'DM Serif Display', serif; font-size: 28px; color: var(--accent); }
+  .acc-outstanding   { margin-top: .75rem; padding: .75rem 1rem; border-radius: var(--radius);
+                       background: rgba(212,101,90,.08); border: 1px solid rgba(212,101,90,.2); }
+  .acc-outstanding.zero { background: rgba(109,171,126,.08); border-color: rgba(109,171,126,.2); }
+  .acc-out-label     { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--rejected); margin-bottom: 3px; }
+  .acc-outstanding.zero .acc-out-label { color: var(--approved); }
+  .acc-out-val       { font-family: 'DM Serif Display', serif; font-size: 22px; color: var(--rejected); }
+  .acc-outstanding.zero .acc-out-val   { color: var(--approved); }
+  .pay-now-btn       { display: block; width: 100%; padding: 11px; background: var(--accent); color: #0f0e0c;
+                       border: none; border-radius: var(--radius); font-family: 'DM Sans', sans-serif;
+                       font-size: 14px; font-weight: 600; cursor: pointer; margin-top: 1rem; text-align: center;
+                       text-decoration: none; transition: background .2s; }
+  .pay-now-btn:hover { background: var(--accent2); }
+
+  /* ── Payment tab ── */
+  .pay-layout        { display: grid; grid-template-columns: 1fr 340px; gap: 1.5rem; align-items: start; }
+  .pay-breakdown     { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  .pay-breakdown-head { padding: .85rem 1.25rem; font-size: 11px; font-weight: 600; text-transform: uppercase;
+                        letter-spacing: .08em; color: var(--accent); border-bottom: 1px solid var(--border); background: var(--surface2); }
+  .pay-breakdown table { width: 100%; border-collapse: collapse; }
+  .pay-breakdown thead th { padding: .6rem 1.25rem; text-align: left; font-size: 10px; font-weight: 600;
+                             letter-spacing: .07em; text-transform: uppercase; color: var(--muted);
+                             background: var(--surface2); border-bottom: 1px solid var(--border); }
+  .pay-breakdown tbody tr { border-bottom: 1px solid var(--border); }
+  .pay-breakdown tbody tr:last-child { border-bottom: none; }
+  .pay-breakdown td  { padding: .8rem 1.25rem; font-size: 13.5px; }
+  .pay-form-card     { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.5rem; position: sticky; top: 1.5rem; }
+  .pay-form-card h3  { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em;
+                       color: var(--accent); margin-bottom: 1.25rem; padding-bottom: .75rem; border-bottom: 1px solid var(--border); }
+  .pay-total-display { font-family: 'DM Serif Display', serif; font-size: 32px; color: var(--accent); margin-bottom: 1.25rem; }
+  .pay-total-display span { font-family: 'DM Sans', sans-serif; font-size: 12px; color: var(--muted); font-weight: 400; display: block; margin-bottom: 4px; }
+  .pay-method-grid   { display: grid; grid-template-columns: repeat(3,1fr); gap: 8px; margin-bottom: 1.25rem; }
+  .pay-method-opt    { position: relative; }
+  .pay-method-opt input[type=radio] { position: absolute; opacity: 0; width: 0; height: 0; }
+  .pay-method-label  { display: flex; flex-direction: column; align-items: center; justify-content: center;
+                       padding: .9rem .5rem; background: var(--surface2); border: 2px solid var(--border);
+                       border-radius: var(--radius); cursor: pointer; transition: all .2s; text-align: center; font-size: 13px; font-weight: 600; gap: 4px; }
+  .pay-method-opt input[type=radio]:checked + .pay-method-label { background: rgba(201,169,110,.1); border-color: var(--accent); color: var(--accent); }
+  .pay-method-sub    { font-size: 10px; font-weight: 400; color: var(--muted); }
+  .pay-confirm-btn   { width: 100%; padding: 12px; background: var(--accent); color: #0f0e0c; border: none;
+                       border-radius: var(--radius); font-family: 'DM Sans', sans-serif; font-size: 14px;
+                       font-weight: 600; cursor: pointer; transition: background .2s; }
+  .pay-confirm-btn:hover    { background: var(--accent2); }
+  .pay-confirm-btn:disabled { background: var(--surface3); color: var(--muted2); cursor: not-allowed; }
+
+  /* Receipt rows */
+  .receipt-card      { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; margin-top: 1rem; }
+  .receipt-head      { padding: .85rem 1.25rem; font-size: 11px; font-weight: 600; text-transform: uppercase;
+                       letter-spacing: .08em; color: var(--accent); border-bottom: 1px solid var(--border); background: var(--surface2); }
 </style>
 </head>
 <body>
@@ -686,6 +860,15 @@ $active_tab = $_GET['tab'] ?? 'overview';
       Visitors
       <?php if ($vc['Pending'] > 0): ?><span class="nbadge"><?= $vc['Pending'] ?></span><?php endif; ?>
     </a>
+    <a class="nav-item <?= $active_tab === 'accounting' ? 'active' : '' ?>" href="?tab=accounting">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="3" width="20" height="18" rx="2"/><path d="M8 7h8M8 11h8M8 15h5"/></svg>
+      Accounting
+      <?php if ($outstanding > 0): ?><span class="nbadge">$<?= number_format($outstanding,0) ?></span><?php endif; ?>
+    </a>
+    <a class="nav-item <?= $active_tab === 'payment' ? 'active' : '' ?>" href="?tab=payment">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/></svg>
+      Payment
+    </a>
   </nav>
   <div class="sidebar-footer">
     <div class="user-chip">
@@ -708,11 +891,13 @@ $active_tab = $_GET['tab'] ?? 'overview';
   <?php endif; ?>
 
   <div class="tabs">
-    <a class="tab <?= $active_tab === 'overview' ? 'active' : '' ?>" href="?tab=overview">Overview</a>
-    <a class="tab <?= $active_tab === 'room'     ? 'active' : '' ?>" href="?tab=room">Room Booking</a>
-    <a class="tab <?= $active_tab === 'my_room'  ? 'active' : '' ?>" href="?tab=my_room">My Room</a>
-    <a class="tab <?= $active_tab === 'my_meal'  ? 'active' : '' ?>" href="?tab=my_meal">My Meals</a>
-    <a class="tab <?= $active_tab === 'visitors' ? 'active' : '' ?>" href="?tab=visitors">Visitors</a>
+    <a class="tab <?= $active_tab === 'overview'    ? 'active' : '' ?>" href="?tab=overview">Overview</a>
+    <a class="tab <?= $active_tab === 'room'        ? 'active' : '' ?>" href="?tab=room">Room Booking</a>
+    <a class="tab <?= $active_tab === 'my_room'     ? 'active' : '' ?>" href="?tab=my_room">My Room</a>
+    <a class="tab <?= $active_tab === 'my_meal'     ? 'active' : '' ?>" href="?tab=my_meal">My Meals</a>
+    <a class="tab <?= $active_tab === 'visitors'    ? 'active' : '' ?>" href="?tab=visitors">Visitors</a>
+    <a class="tab <?= $active_tab === 'accounting'  ? 'active' : '' ?>" href="?tab=accounting">Accounting</a>
+    <a class="tab <?= $active_tab === 'payment'     ? 'active' : '' ?>" href="?tab=payment">Payment</a>
   </div>
 
   <?php /* ══════════════════ OVERVIEW ══════════════════ */ ?>
@@ -871,20 +1056,27 @@ $active_tab = $_GET['tab'] ?? 'overview';
                     <div class="type-option">
                       <input type="radio" name="room_type_requested" id="type_ac" value="AC" required>
                       <label for="type_ac" class="type-label">
-                        <span class="tl-icon">❄️</span>
                         <span class="tl-name">AC</span>
-                        <span class="tl-desc">Air conditioned · <?= $ac_avail ?> available</span>
+                        <span class="tl-pkg" style="font-size:11px;color:var(--accent);font-weight:600;">Spacious</span>
+                        <span class="tl-desc">$400 / month · <?= $ac_avail ?> available</span>
                       </label>
                     </div>
                     <div class="type-option">
                       <input type="radio" name="room_type_requested" id="type_nonac" value="Non-AC" required>
                       <label for="type_nonac" class="type-label">
-                        <span class="tl-icon">🌀</span>
                         <span class="tl-name">Non-AC</span>
-                        <span class="tl-desc">Fan room · <?= $nac_avail ?> available</span>
+                        <span class="tl-pkg" style="font-size:11px;color:var(--accent);font-weight:600;">Regular</span>
+                        <span class="tl-desc">$250 / month · <?= $nac_avail ?> available</span>
                       </label>
                     </div>
                   </div>
+                </div>
+
+                <div class="booking-field">
+                  <label>Duration (months)</label>
+                  <input type="number" name="duration_months" min="1" max="24" placeholder="e.g. 3" required
+                         value="<?= intval($_POST['duration_months'] ?? 1) ?>">
+                  <div style="font-size:11px;color:var(--muted);margin-top:5px;">Between 1 and 24 months.</div>
                 </div>
 
                 <div class="booking-field">
@@ -1517,6 +1709,234 @@ $active_tab = $_GET['tab'] ?? 'overview';
           </tbody>
         </table>
       <?php endif; ?>
+    </div>
+
+  <?php endif; ?>
+
+  <?php /* ══════════════════ ACCOUNTING ══════════════════ */ ?>
+  <?php if ($active_tab === 'accounting'): ?>
+
+    <div class="acc-layout">
+
+      <!-- LEFT: ledger -->
+      <div>
+
+        <!-- Room charges -->
+        <div class="acc-card">
+          <div class="acc-card-head">
+            <span>Room</span>
+            <span style="color:var(--text);font-family:'DM Serif Display',serif;font-size:16px;">
+              $<?= number_format($room_total, 2) ?>
+            </span>
+          </div>
+          <?php if (empty($acc_room_rows)): ?>
+            <div class="empty-state" style="padding:1.5rem;">No room charges yet.</div>
+          <?php else: ?>
+            <table>
+              <thead><tr><th>Package</th><th>Type</th><th>Duration</th><th>Date</th><th style="text-align:right;">Amount</th></tr></thead>
+              <tbody>
+                <?php foreach ($acc_room_rows as $r): ?>
+                <tr>
+                  <td class="fw500"><?= htmlspecialchars($r['Package_Name']) ?></td>
+                  <td><span class="badge <?= $r['Room_Type'] === 'AC' ? 'badge-ac' : 'badge-nonac' ?>"><?= htmlspecialchars($r['Room_Type']) ?></span></td>
+                  <td class="cell-muted"><?= $r['Duration'] ?> month<?= $r['Duration'] > 1 ? 's' : '' ?></td>
+                  <td class="cell-muted"><?= date('d M Y', strtotime($r['Entry_Date'])) ?></td>
+                  <td style="text-align:right;font-weight:600;">$<?= number_format($r['Price'], 2) ?></td>
+                </tr>
+                <?php endforeach; ?>
+              </tbody>
+            </table>
+          <?php endif; ?>
+        </div>
+
+        <!-- Meal charges -->
+        <div class="acc-card">
+          <div class="acc-card-head">
+            <span>Meals</span>
+            <span style="color:var(--text);font-family:'DM Serif Display',serif;font-size:16px;">
+              $<?= number_format($meal_total, 2) ?>
+            </span>
+          </div>
+          <?php if (empty($acc_meal_rows)): ?>
+            <div class="empty-state" style="padding:1.5rem;">No meal charges yet.</div>
+          <?php else: ?>
+            <table>
+              <thead><tr><th>Meal</th><th>Date</th><th style="text-align:right;">Amount</th></tr></thead>
+              <tbody>
+                <?php foreach ($acc_meal_rows as $r): ?>
+                <tr>
+                  <td class="fw500"><?= htmlspecialchars($r['Package_Name']) ?></td>
+                  <td class="cell-muted"><?= date('d M Y', strtotime($r['Entry_Date'])) ?></td>
+                  <td style="text-align:right;font-weight:600;">$<?= number_format($r['Price'], 2) ?></td>
+                </tr>
+                <?php endforeach; ?>
+              </tbody>
+            </table>
+          <?php endif; ?>
+        </div>
+
+        <!-- Payment history -->
+        <?php if (!empty($pay_rows)): ?>
+        <div class="acc-card">
+          <div class="acc-card-head"><span>Payment History</span></div>
+          <table>
+            <thead><tr><th>Receipt #</th><th>Method</th><th>Date</th><th style="text-align:right;">Amount Paid</th></tr></thead>
+            <tbody>
+              <?php foreach ($pay_rows as $p): ?>
+              <tr>
+                <td class="cell-muted">#<?= $p['TX_ID'] ?></td>
+                <td><?= htmlspecialchars($p['Payment_Method']) ?></td>
+                <td class="cell-muted"><?= date('d M Y', strtotime($p['Payment_Date'])) ?></td>
+                <td style="text-align:right;color:var(--approved);font-weight:600;">-$<?= number_format($p['Payment_Amount'], 2) ?></td>
+              </tr>
+              <?php endforeach; ?>
+            </tbody>
+          </table>
+        </div>
+        <?php endif; ?>
+
+      </div>
+
+      <!-- RIGHT: summary -->
+      <div class="acc-summary">
+        <h3>Account Summary</h3>
+        <div class="acc-sum-row"><span class="acc-sum-label">Room charges</span><span>$<?= number_format($room_total, 2) ?></span></div>
+        <div class="acc-sum-row"><span class="acc-sum-label">Meal charges</span><span>$<?= number_format($meal_total, 2) ?></span></div>
+        <div class="acc-sum-row"><span class="acc-sum-label">Total paid</span><span style="color:var(--approved);">-$<?= number_format($total_paid, 2) ?></span></div>
+        <div class="acc-total-row">
+          <span class="acc-total-label">Total charges</span>
+          <span class="acc-total-val">$<?= number_format($total_charges, 2) ?></span>
+        </div>
+        <div class="acc-outstanding <?= $outstanding <= 0 ? 'zero' : '' ?>">
+          <div class="acc-out-label"><?= $outstanding > 0 ? 'Outstanding' : 'Settled' ?></div>
+          <div class="acc-out-val">$<?= number_format(max(0, $outstanding), 2) ?></div>
+        </div>
+        <?php if ($outstanding > 0): ?>
+          <a href="?tab=payment" class="pay-now-btn">Make Payment</a>
+        <?php endif; ?>
+      </div>
+
+    </div>
+
+  <?php /* ══════════════════ PAYMENT ══════════════════ */ ?>
+  <?php elseif ($active_tab === 'payment'): ?>
+
+    <div class="pay-layout">
+
+      <!-- LEFT: full breakdown -->
+      <div>
+        <div class="pay-breakdown">
+          <div class="pay-breakdown-head">Charges Breakdown</div>
+          <?php if (empty($acc_rows)): ?>
+            <div class="empty-state" style="padding:2rem;">No charges on your account yet.</div>
+          <?php else: ?>
+            <table>
+              <thead><tr><th>Description</th><th>Type</th><th>Date</th><th style="text-align:right;">Amount</th></tr></thead>
+              <tbody>
+                <?php foreach ($acc_rows as $r): ?>
+                <tr>
+                  <td class="fw500">
+                    <?= htmlspecialchars($r['Package_Name']) ?>
+                    <?php if ($r['Entry_Type'] === 'Room'): ?>
+                      <div class="cell-muted"><?= $r['Duration'] ?> month<?= $r['Duration'] > 1 ? 's' : '' ?></div>
+                    <?php endif; ?>
+                  </td>
+                  <td><span class="badge <?= $r['Entry_Type'] === 'Room' ? 'badge-allocated' : 'badge-pending' ?>"><?= $r['Entry_Type'] ?></span></td>
+                  <td class="cell-muted"><?= date('d M Y', strtotime($r['Entry_Date'])) ?></td>
+                  <td style="text-align:right;font-weight:600;">$<?= number_format($r['Price'], 2) ?></td>
+                </tr>
+                <?php endforeach; ?>
+                <tr style="background:var(--surface2);">
+                  <td colspan="3" style="font-weight:600;font-size:13px;">Total Charges</td>
+                  <td style="text-align:right;font-weight:700;font-size:15px;">$<?= number_format($total_charges, 2) ?></td>
+                </tr>
+                <?php if ($total_paid > 0): ?>
+                <tr style="background:var(--surface2);">
+                  <td colspan="3" style="color:var(--approved);font-size:13px;">Already Paid</td>
+                  <td style="text-align:right;color:var(--approved);font-weight:600;">-$<?= number_format($total_paid, 2) ?></td>
+                </tr>
+                <tr style="background:var(--surface2);">
+                  <td colspan="3" style="font-weight:700;font-size:13px;">Outstanding Balance</td>
+                  <td style="text-align:right;font-weight:700;font-size:16px;color:var(--<?= $outstanding > 0 ? 'rejected' : 'approved' ?>);">$<?= number_format(max(0,$outstanding), 2) ?></td>
+                </tr>
+                <?php endif; ?>
+              </tbody>
+            </table>
+          <?php endif; ?>
+        </div>
+
+        <!-- Past receipts -->
+        <?php if (!empty($pay_rows)): ?>
+        <div class="receipt-card">
+          <div class="receipt-head">Payment Receipts</div>
+          <table style="width:100%;border-collapse:collapse;">
+            <thead><tr>
+              <th style="padding:.6rem 1.25rem;text-align:left;font-size:10px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);background:var(--surface2);border-bottom:1px solid var(--border);">Receipt #</th>
+              <th style="padding:.6rem 1.25rem;text-align:left;font-size:10px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);background:var(--surface2);border-bottom:1px solid var(--border);">Method</th>
+              <th style="padding:.6rem 1.25rem;text-align:left;font-size:10px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);background:var(--surface2);border-bottom:1px solid var(--border);">Date</th>
+              <th style="padding:.6rem 1.25rem;text-align:right;font-size:10px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);background:var(--surface2);border-bottom:1px solid var(--border);">Amount</th>
+            </tr></thead>
+            <tbody>
+              <?php foreach ($pay_rows as $p): ?>
+              <tr style="border-bottom:1px solid var(--border);">
+                <td style="padding:.8rem 1.25rem;font-size:13.5px;color:var(--muted);">#<?= $p['TX_ID'] ?></td>
+                <td style="padding:.8rem 1.25rem;font-size:13.5px;"><?= htmlspecialchars($p['Payment_Method']) ?></td>
+                <td style="padding:.8rem 1.25rem;font-size:13px;color:var(--muted);"><?= date('d M Y', strtotime($p['Payment_Date'])) ?></td>
+                <td style="padding:.8rem 1.25rem;font-size:13.5px;text-align:right;font-weight:600;color:var(--approved);">$<?= number_format($p['Payment_Amount'], 2) ?></td>
+              </tr>
+              <?php endforeach; ?>
+            </tbody>
+          </table>
+        </div>
+        <?php endif; ?>
+      </div>
+
+      <!-- RIGHT: payment form -->
+      <div class="pay-form-card">
+        <h3>Make Payment</h3>
+        <?php if ($outstanding > 0): ?>
+          <div class="pay-total-display">
+            <span>Outstanding balance</span>
+            $<?= number_format($outstanding, 2) ?>
+          </div>
+          <form method="POST" action="?tab=payment">
+            <input type="hidden" name="action" value="make_payment">
+            <div style="font-size:11px;font-weight:500;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px;">Payment method</div>
+            <div class="pay-method-grid">
+              <div class="pay-method-opt">
+                <input type="radio" name="payment_method" id="pm_cash" value="Cash" required>
+                <label for="pm_cash" class="pay-method-label">
+                  Cash
+                  <span class="pay-method-sub">In person</span>
+                </label>
+              </div>
+              <div class="pay-method-opt">
+                <input type="radio" name="payment_method" id="pm_card" value="Card">
+                <label for="pm_card" class="pay-method-label">
+                  Card
+                  <span class="pay-method-sub">Debit / Credit</span>
+                </label>
+              </div>
+              <div class="pay-method-opt">
+                <input type="radio" name="payment_method" id="pm_bkash" value="bKash">
+                <label for="pm_bkash" class="pay-method-label">
+                  bKash
+                  <span class="pay-method-sub">Mobile</span>
+                </label>
+              </div>
+            </div>
+            <button type="submit" class="pay-confirm-btn"
+                    onclick="return confirm('Confirm payment of $<?= number_format($outstanding, 2) ?>?')">
+              Confirm Payment
+            </button>
+          </form>
+        <?php else: ?>
+          <div style="color:var(--approved);font-size:13.5px;line-height:1.6;padding:.5rem 0;">
+            Your account is fully settled. No outstanding balance.
+          </div>
+        <?php endif; ?>
+      </div>
+
     </div>
 
   <?php endif; ?>
