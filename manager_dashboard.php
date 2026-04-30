@@ -56,7 +56,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     if ($action === 'allocate_room' && isset($_POST['booking_id'])) {
         $booking_id  = intval($_POST['booking_id']);
         $floor_num   = intval($_POST['floor_num']);
-        $room_num    = intval($_POST['room_num']);
+        $room_pos    = intval($_POST['room_num']);         // position within floor (1–20)
+        $room_num    = $floor_num * 100 + $room_pos;      // combined: e.g. floor 1 pos 1 → 101
         $bed_num     = intval($_POST['bed_num']);
         $checkin     = trim($_POST['check_in_date'] ?? "") ?: date('Y-m-d');
         $alloc_cid   = intval($_POST['alloc_client_id']);
@@ -116,17 +117,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     // ── Add/edit room ────────────────────────────────────────────
     if ($action === 'save_room') {
         $fl    = intval($_POST['floor_num']);
-        $rm    = intval($_POST['room_num']);
+        $rm    = intval($_POST['room_num']);   // position within floor (1–20)
         $rtype = trim($_POST['room_type']);
         $cap   = intval($_POST['capacity']);
         $rst   = trim($_POST['room_status']);
+
+        $rm_combined = $fl * 100 + $rm;       // combined room number e.g. 101, 510
+
         if ($fl<1||$fl>6||$rm<1||$rm>20) {
-            $message = "Floor must be 1–6, room must be 1–20."; $msg_type = "error";
+            $message = "Floor must be 1–6, room position must be 1–20."; $msg_type = "error";
         } else {
             $stmt = mysqli_prepare($conn, "INSERT INTO Room (Floor_num, Room_num, Room_type, Capacity, Status) VALUES (?,?,?,?,?) ON DUPLICATE KEY UPDATE Room_type=VALUES(Room_type), Capacity=VALUES(Capacity), Status=VALUES(Status)");
-            mysqli_stmt_bind_param($stmt, "iisis", $fl, $rm, $rtype, $cap, $rst);
+            mysqli_stmt_bind_param($stmt, "iisis", $fl, $rm_combined, $rtype, $cap, $rst);
             if (mysqli_stmt_execute($stmt)) {
-                header("Location: ?tab=rooms&rtab=manage&msg=" . urlencode("Room Floor $fl / Room $rm saved.") . "&mt=success");
+                header("Location: ?tab=rooms&rtab=manage&msg=" . urlencode("Room Floor $fl / Room $rm_combined saved.") . "&mt=success");
                 exit();
             }
             else { $message = "Failed: " . mysqli_error($conn); $msg_type = "error"; }
