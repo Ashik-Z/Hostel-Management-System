@@ -13,7 +13,6 @@ $client_name = $_SESSION['name'];
 $message     = htmlspecialchars($_GET['msg'] ?? "");
 $msg_type    = in_array($_GET['mt'] ?? '', ['success','error']) ? $_GET['mt'] : "";
 
-// ── POST: request visitor ────────────────────────────────────────
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
 
     if ($_POST['action'] === 'request_visitor') {
@@ -25,7 +24,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             $message  = "Visitor name is required.";
             $msg_type = "error";
         } else {
-            // Duplicate guard: same client, same visitor name, same requested time, still Pending
             $dup_chk = mysqli_prepare($conn, "SELECT Visitor_ID FROM Visitors_log WHERE Client_id = ? AND Visitor_Name = ? AND Status = 'Pending' LIMIT 1");
             mysqli_stmt_bind_param($dup_chk, "is", $client_id, $visitor_name);
             mysqli_stmt_execute($dup_chk);
@@ -49,7 +47,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         }
     }
 
-    // ── POST: submit room booking request ───────────────────────
     elseif ($_POST['action'] === 'book_room') {
         $room_type_req  = trim($_POST['room_type_requested'] ?? "");
         $preferred_date = trim($_POST['preferred_checkin'] ?? "") ?: date('Y-m-d');
@@ -75,12 +72,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             } else {
                 mysqli_begin_transaction($conn);
                 try {
-                    // Insert booking
                     $ins = mysqli_prepare($conn, "INSERT INTO Booking_Allocation (Room_type_requested, Booking_date, Check_in_date, Booking_status, client_id) VALUES (?, CURDATE(), ?, 'Pending', ?)");
                     mysqli_stmt_bind_param($ins, "ssi", $room_type_req, $preferred_date, $client_id);
                     if (!mysqli_stmt_execute($ins)) throw new Exception(mysqli_error($conn));
 
-                    // Insert accounting entry
                     $pkg      = $ROOM_PACKAGES[$room_type_req];
                     $price    = $pkg['rate'] * $duration;
                     $pkg_name = $pkg['name'];
@@ -101,8 +96,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     }
 }
 
-// ── Fetch client profile ─────────────────────────────────────────
-// ── Meal menu (single source of truth, used in POST + view) ──────
+
 $MEAL_MENU = [
     'Breakfast' => [
         'Light'  => ['items' => ['Bread', 'Jam', 'Butter'],                         'price' => 25.00],
@@ -128,7 +122,7 @@ $MEAL_MENU = [
 $VALID_CATS = ['Breakfast', 'Lunch', 'Snacks', 'Dinner'];
 $VALID_SUBS = ['Light', 'Medium', 'Full'];
 
-// POST: book a meal
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'book_meal') {
     $meal_cat  = trim($_POST['meal_category']    ?? '');
     $meal_sub  = trim($_POST['meal_subcategory'] ?? '');
@@ -156,7 +150,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                 mysqli_stmt_bind_param($ins, 'ssdi', $type_str, $meal_date, $price, $client_id);
                 if (!mysqli_stmt_execute($ins)) throw new Exception(mysqli_error($conn));
 
-                // Accounting entry for meal
                 $acc = mysqli_prepare($conn, "INSERT INTO Accountings (Package_Name, Room_Type, Duration, Price, Client_ID, Entry_Type, Entry_Date, Manager_ID) VALUES (?, NULL, 1, ?, ?, 'Meal', ?, NULL)");
                 mysqli_stmt_bind_param($acc, 'sdis', $type_str, $price, $client_id, $meal_date);
                 if (!mysqli_stmt_execute($acc)) throw new Exception(mysqli_error($conn));
@@ -172,7 +165,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     }
 }
 
-// POST: cancel a meal
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'cancel_meal') {
     $meal_id = intval($_POST['meal_id'] ?? 0);
     $chk = mysqli_prepare($conn, "SELECT Date FROM Meal_Booking WHERE Meal_Booking_ID = ? AND Client_ID = ? LIMIT 1");
@@ -185,7 +177,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         $message = 'Past meal bookings cannot be cancelled.'; $msg_type = 'error';
     } else {
         mysqli_begin_transaction($conn);
-        // Fetch the meal type before deleting for accounting cleanup
         $mtype_res = mysqli_prepare($conn, "SELECT Type, Date FROM Meal_Booking WHERE Meal_Booking_ID = ? AND Client_ID = ? LIMIT 1");
         mysqli_stmt_bind_param($mtype_res, 'ii', $meal_id, $client_id);
         mysqli_stmt_execute($mtype_res);
@@ -195,7 +186,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         mysqli_stmt_bind_param($del, 'ii', $meal_id, $client_id);
         mysqli_stmt_execute($del);
 
-        // Remove matching accounting entry (same package name, date, client)
         if ($mtype_row) {
             $dacc = mysqli_prepare($conn, "DELETE FROM Accountings WHERE Client_ID = ? AND Package_Name = ? AND Entry_Date = ? AND Entry_Type = 'Meal' LIMIT 1");
             mysqli_stmt_bind_param($dacc, 'iss', $client_id, $mtype_row['Type'], $mtype_row['Date']);
@@ -207,17 +197,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     }
 }
 
-// Fetch all meal bookings for this client
 $mstmt = mysqli_prepare($conn, "SELECT Meal_Booking_ID, Type, Date, Total_cost FROM Meal_Booking WHERE Client_ID = ? ORDER BY Date DESC, Meal_Booking_ID DESC");
 mysqli_stmt_bind_param($mstmt, 'i', $client_id);
 mysqli_stmt_execute($mstmt);
 $meal_rows = mysqli_fetch_all(mysqli_stmt_get_result($mstmt), MYSQLI_ASSOC);
 
-// Build a [date => [bookings]] index for the week planner
 $meal_by_date = [];
 foreach ($meal_rows as $mr) { $meal_by_date[$mr['Date']][] = $mr; }
 
-// Upcoming meals count for sidebar badge
 $upcoming_meals = 0;
 foreach ($meal_rows as $mr) { if ($mr['Date'] >= date('Y-m-d')) $upcoming_meals++; }
 
@@ -234,7 +221,6 @@ mysqli_stmt_bind_param($stmt, "i", $user_id);
 mysqli_stmt_execute($stmt);
 $client = mysqli_fetch_assoc(mysqli_stmt_get_result($stmt));
 
-// ── Fetch visitor log ────────────────────────────────────────────
 $vsql  = "SELECT Visitor_ID, Visitor_Name, Visitor_Phone,
                  Status, Requested_time, Entry_time, Exit_time
           FROM Visitors_log WHERE Client_id = ? ORDER BY Visitor_ID DESC";
@@ -248,7 +234,6 @@ while ($row = mysqli_fetch_assoc($vres)) $visitor_rows[] = $row;
 $vc = ['Pending' => 0, 'Approved' => 0, 'Rejected' => 0];
 foreach ($visitor_rows as $v) { if (isset($vc[$v['Status']])) $vc[$v['Status']]++; }
 
-// ── Fetch client's bookings ──────────────────────────────────────
 $bsql  = "SELECT ba.Booking_ID, ba.Room_type_requested, ba.Booking_date,
                  ba.Check_in_date, ba.Booking_status,
                  ba.Floor_num, ba.Room_num, ba.Bed_num
@@ -262,7 +247,6 @@ $bres = mysqli_stmt_get_result($bstmt);
 $my_bookings = [];
 while ($row = mysqli_fetch_assoc($bres)) $my_bookings[] = $row;
 
-// Active booking (Pending or Allocated) for overview card
 $active_booking = null;
 foreach ($my_bookings as $b) {
     if (in_array($b['Booking_status'], ['Pending', 'Allocated'])) {
@@ -271,14 +255,12 @@ foreach ($my_bookings as $b) {
     }
 }
 
-// ── Fetch room availability grid (read-only for client) ──────────
 $room_grid = [];
 $rg = mysqli_query($conn, "SELECT r.Floor_num, r.Room_num, r.Room_type, r.Capacity, r.Status,
     (SELECT COUNT(*) FROM Stays_IN si WHERE si.Floor_NUM = r.Floor_num AND si.Room_NUm = r.Room_num) AS occupants
     FROM Room r ORDER BY r.Floor_num, r.Room_num");
 while ($row = mysqli_fetch_assoc($rg)) $room_grid[$row['Floor_num']][$row['Room_num']] = $row;
 
-// Room availability counts
 $ac_avail  = 0; $ac_total  = 0;
 $nac_avail = 0; $nac_total = 0;
 foreach ($room_grid as $floor) {
@@ -288,8 +270,6 @@ foreach ($room_grid as $floor) {
     }
 }
 
-// ── Fetch client's Stays_IN record + full room details ────────────
-// A client has a Stays_IN row once the manager allocates & inserts it.
 $stays_sql = "SELECT
         si.Floor_NUM        AS floor,
         si.Room_NUm         AS room,
@@ -317,7 +297,6 @@ mysqli_stmt_bind_param($stays_stmt, "i", $client_id);
 mysqli_stmt_execute($stays_stmt);
 $my_room = mysqli_fetch_assoc(mysqli_stmt_get_result($stays_stmt));
 
-// Roommates: other clients in the same room (names only, no personal detail leak)
 $roommates = [];
 if ($my_room) {
     $rm_sql  = "SELECT u.F_name, u.L_name, ba.Bed_num
@@ -339,14 +318,12 @@ if ($my_room) {
     while ($row = mysqli_fetch_assoc($rm_res)) $roommates[] = $row;
 }
 
-// ── POST: make payment ───────────────────────────────────────────
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'make_payment') {
     $pay_method   = trim($_POST['payment_method'] ?? '');
     $valid_methods = ['Cash', 'Card', 'bKash'];
     if (!in_array($pay_method, $valid_methods)) {
         $message = "Please select a valid payment method."; $msg_type = "error";
     } else {
-        // Calculate outstanding balance
         $tot_stmt = mysqli_prepare($conn, "SELECT COALESCE(SUM(Price),0) AS total FROM Accountings WHERE Client_ID = ?");
         mysqli_stmt_bind_param($tot_stmt, 'i', $client_id);
         mysqli_stmt_execute($tot_stmt);
@@ -374,7 +351,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     }
 }
 
-// ── Fetch accounting ledger ──────────────────────────────────────
 $acc_stmt = mysqli_prepare($conn, "SELECT Package_ID, Package_Name, Room_Type, Duration, Price, Entry_Type, Entry_Date FROM Accountings WHERE Client_ID = ? ORDER BY Entry_Date ASC, Package_ID ASC");
 mysqli_stmt_bind_param($acc_stmt, 'i', $client_id);
 mysqli_stmt_execute($acc_stmt);
@@ -384,7 +360,6 @@ $acc_room_rows  = array_filter($acc_rows, fn($r) => $r['Entry_Type'] === 'Room')
 $acc_meal_rows  = array_filter($acc_rows, fn($r) => $r['Entry_Type'] === 'Meal');
 $total_charges  = array_sum(array_column($acc_rows, 'Price'));
 
-// ── Fetch payment history ────────────────────────────────────────
 $pay_stmt = mysqli_prepare($conn, "SELECT TX_ID, Payment_Amount, Payment_Method, Payment_Date FROM Payment_Record WHERE Client_ID = ? ORDER BY Payment_Date DESC, TX_ID DESC");
 mysqli_stmt_bind_param($pay_stmt, 'i', $client_id);
 mysqli_stmt_execute($pay_stmt);

@@ -12,11 +12,9 @@ $message  = htmlspecialchars($_GET['msg'] ?? "");
 $msg_type = in_array($_GET['mt'] ?? '', ['success','error']) ? $_GET['mt'] : "";
 $active_tab   = $_GET['tab'] ?? 'registrations';
 
-// ── POST actions ─────────────────────────────────────────────────
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     $action = $_POST['action'];
 
-    // ── Approve/reject client registration ───────────────────────
     if (in_array($action, ['approve_client','reject_client']) && isset($_POST['client_id'])) {
         $cid    = intval($_POST['client_id']);
         $status = $action === 'approve_client' ? 'Approved' : 'Rejected';
@@ -28,7 +26,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         } else { $message = "Could not update. Already processed."; $msg_type = "error"; }
     }
 
-    // ── Approve/reject visitor ───────────────────────────────────
     if ($action === 'approve_visitor' && isset($_POST['visitor_id'])) {
         $vid   = intval($_POST['visitor_id']);
         $entry = trim($_POST['entry_time'] ?? "") ?: null;
@@ -52,7 +49,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         else { $message = "Could not reject. Already processed."; $msg_type = "error"; }
     }
 
-    // ── Allocate room to client ──────────────────────────────────
     if ($action === 'allocate_room' && isset($_POST['booking_id'])) {
         $booking_id  = intval($_POST['booking_id']);
         $floor_num   = intval($_POST['floor_num']);
@@ -62,7 +58,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         $checkin     = trim($_POST['check_in_date'] ?? "") ?: date('Y-m-d');
         $alloc_cid   = intval($_POST['alloc_client_id']);
 
-        // Validate room exists, is available, matches requested type
         $room_stmt = mysqli_prepare($conn, "SELECT r.Room_type, r.Capacity, r.Status, ba.Room_type_requested,
             (SELECT COUNT(*) FROM Stays_IN WHERE Floor_NUM=r.Floor_num AND Room_NUm=r.Room_num) AS occupants
             FROM Room r
@@ -83,17 +78,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         } else {
             mysqli_begin_transaction($conn);
             try {
-                // Update booking
                 $upd = mysqli_prepare($conn, "UPDATE Booking_Allocation SET Booking_status='Allocated', Floor_num=?, Room_num=?, Bed_num=?, Check_in_date=? WHERE Booking_ID=?");
                 mysqli_stmt_bind_param($upd, "iissi", $floor_num, $room_num, $bed_num, $checkin, $booking_id);
                 if (!mysqli_stmt_execute($upd)) throw new Exception(mysqli_error($conn));
 
-                // Insert Stays_IN
                 $ins = mysqli_prepare($conn, "INSERT IGNORE INTO Stays_IN (client_id, Floor_NUM, Room_NUm) VALUES (?,?,?)");
                 mysqli_stmt_bind_param($ins, "iii", $alloc_cid, $floor_num, $room_num);
                 if (!mysqli_stmt_execute($ins)) throw new Exception(mysqli_error($conn));
 
-                // Check if room is now full → mark Unavailable
                 $occ_res = mysqli_prepare($conn, "SELECT COUNT(*) AS c FROM Stays_IN WHERE Floor_NUM=? AND Room_NUm=?");
                 mysqli_stmt_bind_param($occ_res, "ii", $floor_num, $room_num);
                 mysqli_stmt_execute($occ_res);
@@ -114,7 +106,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         }
     }
 
-    // ── Add/edit room ────────────────────────────────────────────
+    
     if ($action === 'save_room') {
         $fl    = intval($_POST['floor_num']);
         $rm    = intval($_POST['room_num']);   // position within floor (1–20)
@@ -138,7 +130,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     }
 }
 
-// ── Stats ────────────────────────────────────────────────────────
+
 function qcount($conn, $sql) { return mysqli_fetch_assoc(mysqli_query($conn,$sql))['c']; }
 $s = [
     'cpending'  => qcount($conn,"SELECT COUNT(*) AS c FROM Client WHERE Status='Pending'"),
@@ -158,7 +150,7 @@ $s = [
     'acc_paid'   => qcount($conn,"SELECT COUNT(*) AS c FROM (SELECT c.ID FROM Client c LEFT JOIN Accountings a ON a.Client_ID=c.ID LEFT JOIN Payment_Record pr ON pr.Client_ID=c.ID WHERE c.Status='Approved' GROUP BY c.ID HAVING COALESCE(SUM(a.Price),0)-COALESCE(SUM(pr.Payment_Amount),0)<=0) x"),
 ];
 
-// ── Fetch clients ────────────────────────────────────────────────
+
 $cf = $_GET['filter'] ?? 'Pending';
 if (!in_array($cf,['Pending','Approved','Rejected','All'])) $cf='Pending';
 if ($cf==='All') {
@@ -169,7 +161,7 @@ if ($cf==='All') {
 }
 $clients=[]; while($row=mysqli_fetch_assoc($cr)) $clients[]=$row;
 
-// ── Fetch visitors ───────────────────────────────────────────────
+
 $vf = $_GET['vfilter'] ?? 'Pending';
 if (!in_array($vf,['Pending','Approved','Rejected','All'])) $vf='Pending';
 if ($vf==='All') {
@@ -180,7 +172,7 @@ if ($vf==='All') {
 }
 $visitors=[]; while($row=mysqli_fetch_assoc($vr)) $visitors[]=$row;
 
-// ── Fetch pending bookings ───────────────────────────────────────
+
 $bf = $_GET['bfilter'] ?? 'Pending';
 if (!in_array($bf,['Pending','Allocated','All'])) $bf='Pending';
 if ($bf==='All') {
@@ -191,12 +183,12 @@ if ($bf==='All') {
 }
 $bookings=[]; while($row=mysqli_fetch_assoc($br)) $bookings[]=$row;
 
-// ── Fetch room grid (all 6 floors) ───────────────────────────────
+
 $room_grid = [];
 $rg = mysqli_query($conn,"SELECT r.Floor_num,r.Room_num,r.Room_type,r.Capacity,r.Status,(SELECT COUNT(*) FROM Stays_IN si WHERE si.Floor_NUM=r.Floor_num AND si.Room_NUm=r.Room_num) AS occupants FROM Room r ORDER BY r.Floor_num,r.Room_num");
 while ($row=mysqli_fetch_assoc($rg)) $room_grid[$row['Floor_num']][$row['Room_num']] = $row;
 
-// ── Fetch accounting overview (one row per approved client) ──────
+
 $acc_filter = $_GET['afilter'] ?? 'All';
 if (!in_array($acc_filter, ['All','Unpaid','Paid'])) $acc_filter = 'All';
 
