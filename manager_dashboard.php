@@ -109,12 +109,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     
     if ($action === 'save_room') {
         $fl    = intval($_POST['floor_num']);
-        $rm    = intval($_POST['room_num']);   // position within floor (1–20)
+        $rm    = intval($_POST['room_num']);   
         $rtype = trim($_POST['room_type']);
         $cap   = intval($_POST['capacity']);
         $rst   = trim($_POST['room_status']);
 
-        $rm_combined = $fl * 100 + $rm;       // combined room number e.g. 101, 510
+        $rm_combined = $fl * 100 + $rm;       // uniquely identifying room by floor num and room num.
 
         if ($fl<1||$fl>6||$rm<1||$rm>20) {
             $message = "Floor must be 1–6, room position must be 1–20."; $msg_type = "error";
